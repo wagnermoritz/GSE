@@ -16,7 +16,6 @@ class Attack(object):
     '''
 
     def __init__(self, model, targeted=False, img_range=(0, 1)):
-
         self.model = model
         self.device = next(model.parameters()).device
         self.targeted = targeted
@@ -296,6 +295,9 @@ class GSEAttack(Attack):
 
 
     def f(self, x, y, kappa=0):
+        '''
+        CW loss function
+        '''
         logits = self.model(x)
         one_hot_y = F.one_hot(y, logits.size(1))
         Z_t = torch.sum(logits * one_hot_y, dim=1)
@@ -520,7 +522,7 @@ class StrAttack(Attack):
 
     def f(self, x, y):
         '''
-        f from page 9 of the C&W paper
+        CW loss function
         '''
         logits = self.model(x)
         one_hot_labels = F.one_hot(y, logits.size(1)).to(self.device)
@@ -875,7 +877,10 @@ class HomotopyAttack(Attack):
 
 
     def prox_pixel(self, x, alpha, lambda1, original_img):
-
+        '''
+        Applies the proximal operator of the group norm to x. Each group
+        corresponds to a superpixel in the original image.
+        '''
         B, C, H, W = x.shape
         temp_x = x.data * torch.ones_like(x)
 
@@ -906,6 +911,9 @@ class HomotopyAttack(Attack):
 
 
     def pert_groups(self, x):
+        '''
+        Checks which superpixels have non-zero perturbation.
+        '''
         C = x.shape[1]
         pert = torch.zeros((self.groups.max(),), device=x.device, dtype=torch.float)
         for i in range(self.groups.max()):
@@ -916,6 +924,10 @@ class HomotopyAttack(Attack):
 
 
     def group_thres(self, x, x0norm, max_update):
+        '''
+        Sets the perturbation for all superpixels except for the k with the 
+        largest 2-norm to zero.
+        '''
         B, C, W, H = x.shape
         norms = torch.zeros((self.groups.max(),), device=x.device, dtype=torch.float)
         for i in range(self.groups.max()):

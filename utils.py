@@ -16,6 +16,9 @@ import matplotlib.pyplot as plt
 
 
 class CustomDataSet(Dataset):
+    '''
+    Dataset class for NIPS2017 images.
+    '''
     def __init__(self, main_dir, transform, labels):
         self.main_dir = main_dir
         self.transform = transform
@@ -34,6 +37,9 @@ class CustomDataSet(Dataset):
     
 
 def getNIPSDataloader(data_path, b_size):
+    '''
+    Returns a dataloader for the NIPS2017 dataset using a CustomDataSet object.
+    '''
     imagenet_transform = transforms.Compose([transforms.Resize(256, antialias=None),
                                         transforms.ToTensor(),
                                         transforms.Normalize([.5, .5, .5],
@@ -51,6 +57,9 @@ def getNIPSDataloader(data_path, b_size):
 
     
 def getCIFARDataloader(data_path, b_size, download=False):
+    '''
+    Returns a dataloader for the CIFAR10 dataset.
+    '''
     normalize = transforms.Normalize([.5, .5, .5], [.5, .5, .5])
     dataloader = torch.utils.data.DataLoader(
         datasets.CIFAR10(root=data_path, train=False, download=download,
@@ -61,11 +70,10 @@ def getCIFARDataloader(data_path, b_size, download=False):
     return dataloader
 
 
-def countClusters(pertmask, GB=False):
-    if GB:
-        gb = torchvision.transforms.GaussianBlur((3, 3), sigma=1.0)
-        pertmask = gb(pertmask.view(1, 1, *pertmask.shape)).view(*pertmask.shape)
-        pertmask = torch.where(pertmask != 0, 1, 0)
+def countClusters(pertmask):
+    '''
+    Counts the number of non-zero pixel clusters in a given perturbation.
+    '''
     notdiscovered = torch.zeros((pertmask.size(0) + 2, pertmask.size(1) + 2))
     notdiscovered[1:pertmask.size(0)+1, 1:pertmask.size(1)+1] = pertmask.clone()
     intmask = torch.zeros_like(notdiscovered)
@@ -77,6 +85,10 @@ def countClusters(pertmask, GB=False):
 
 
 def DFS(notdiscovered, intmask, i):
+    '''
+    Performs DFS on a perturbation by treating adjascent non-zero pixels as
+    neighboring nodes of a graph.
+    '''
     neighbors = [[-1, -1], [-1, 0], [-1, 1], [0, -1], [0, 1], [1, -1], [1, 0], [1, 1]]
     nonzeroidxs = torch.nonzero(notdiscovered, as_tuple=True)
     rnd = random.randint(0, len(nonzeroidxs[0])-1)
@@ -95,6 +107,10 @@ def DFS(notdiscovered, intmask, i):
 
 
 def ASM(model, x, t, t0, device):
+    '''
+    Computed the adversarial saliancy map of the given model at x wrt target
+    label t and true label t0.
+    '''
     x.requires_grad = True
     out = model(x)
     grd = torch.zeros(out.shape, device=device)
@@ -112,6 +128,10 @@ def ASM(model, x, t, t0, device):
 
 
 def ASM_percentile(asm, P, device):
+    '''
+    Returns a list of Pth percentiles for all adversarial saliancy maps in the
+    batch asm.
+    '''
     asm = asm.view(asm.size(0), -1)
     asm = torch.sort(asm, dim=-1)[0]
     out = []
@@ -123,6 +143,9 @@ def ASM_percentile(asm, P, device):
 
 
 def IS(model, x, y, delta, P, t, device):
+    '''
+    Computes the interpretability scores for the batch of perturbations delta.
+    '''
     mask = torch.norm(delta, p=2, dim=(1, 2, 3)) > 0
     x = x[mask]
     y = y[mask]
@@ -134,6 +157,10 @@ def IS(model, x, y, delta, P, t, device):
 
 
 class CAMNet(nn.Module):
+    '''
+    Class for the last fully connected layer of CNNs used for computing the
+    class activation map.
+    '''
     def __init__(self, numclasses=1000, latent_dim=512):
         super().__init__()
         self.fc = nn.Linear(latent_dim, numclasses, bias=False)
@@ -146,6 +173,10 @@ class CAMNet(nn.Module):
 
 
 def CAM(model1, model2, x, y):
+    '''
+    Computes the class activation map of the CNN model2 with the last fully
+    connected layers removed.
+    '''
     transf = transforms.Compose([transforms.Resize((256, 256), torchvision.transforms.InterpolationMode.BICUBIC)])
     weight = list(model1.parameters())[-1].data
     last_conv = model2(x).detach()
@@ -160,6 +191,10 @@ def CAM(model1, model2, x, y):
 
 
 def loadImages(image_files, labels, targets, path_to_images):
+    '''
+    Loads images from the paths given in the list image files and returns the
+    images, labels and targets as tensors.
+    '''
     labels = torch.tensor(labels).long()
     targets = torch.tensor(targets).long()
     images = []
@@ -177,6 +212,9 @@ def loadImages(image_files, labels, targets, path_to_images):
 
 
 def extract_patches(x, size=8):
+    '''
+    Extracts all n by n pixel patches from every image in the batch x.
+    '''
     B, C, H, W = x.shape
 
     kernel = torch.zeros((size ** 2, size ** 2))
@@ -190,7 +228,11 @@ def extract_patches(x, size=8):
     return out.contiguous()
 
 
-def l_2_0(x, size=8):
+def d_2_0(x, size=8):
+    '''
+    Computed the value of the d_2_0 function, i.e. the number of non-zero
+    n by n patches in each image in the batch x.
+    '''
     l20s = []
     for x_ in x:
         patches = extract_patches(x_.unsqueeze(0), size)
@@ -200,6 +242,11 @@ def l_2_0(x, size=8):
 
 
 def test_targeted(attack, dataloader, labeloffsets, numclasses, num_batches):
+    '''
+    Evaluates a given targeted attack in terms of ASR, sparsity, number of
+    clusters, 2-norm, d_2_0 value, each for best, average, and worst case, and
+    interpretability scores and computation time.
+    '''
     percentiles = [50, 60, 70, 80, 90]
     IS_scores = [[] for _ in percentiles]
     l0s3 = [[], [], []]
@@ -245,7 +292,7 @@ def test_targeted(attack, dataloader, labeloffsets, numclasses, num_batches):
 
             l0s.append(torch.norm((x_adv - x).abs().mean(1), p=0, dim=(1,2)).cpu())
             l2s.append(torch.norm((x_adv - x), p=2, dim=(1,2,3)).cpu())
-            l20s.append(l_2_0(x_adv - x).cpu())
+            l20s.append(d_2_0(x_adv - x).cpu())
             l0s[-1][mask] = 1e10
             l2s[-1][mask] = 1e10
             l20s[-1][mask] = 1e10
@@ -316,11 +363,14 @@ def test_targeted(attack, dataloader, labeloffsets, numclasses, num_batches):
 
 
 def test_untargeted(attack, dataloader, num_batches):
+    '''
+    Evaluates a given untargeted attack in terms of ASR, sparsity, number of
+    clusters, 2-norm, d_2_0 value, and computation time.
+    '''
     l0s = []
     l2s = []
     l20s = []
     clusters = []
-    GBclusters = []
     successes = []
     total_time = 0
     n = 0
@@ -354,14 +404,16 @@ def test_untargeted(attack, dataloader, num_batches):
         total_time += after - before
         l0s.append(torch.norm((x_adv - x).abs().mean(1), p=0, dim=(1,2)).cpu())
         l2s.append(torch.norm((x_adv - x), p=2, dim=(1,2,3)).cpu())
-        l20s.append(l_2_0(x_adv - x).cpu())
+        l20s.append(d_2_0(x_adv - x).cpu())
         clusters.append(torch.tensor([countClusters((x_adv.cpu() - x.cpu())[idx].abs().mean(0)!=0).max().int().item() for idx in range(len(x))]))
-        GBclusters.append(torch.tensor([countClusters((x_adv.cpu() - x.cpu())[idx].abs().mean(0)!=0, GB=True).max().int().item() for idx in range(len(x))]))
 
-    return l0s, clusters, GBclusters, successes, total_time / n, l2s, l20s
+    return l0s, clusters, successes, total_time / n, l2s, l20s
 
 
 def save_images(x_adv, x_cam, images, dir_str):
+    '''
+    Saves images to the path dir_str.
+    '''
     x_adv = x_adv.cpu()
     images = images.cpu()
     x_cam = x_cam.cpu()
@@ -395,6 +447,9 @@ def save_images(x_adv, x_cam, images, dir_str):
 
 
 def write_untargeted_results(results, file):
+    '''
+    Writes results in a file.
+    '''
     string = f"L0: {torch.cat(results[0]).mean().item()}\n"
     string += f"L2: {torch.cat(results[5]).mean().item()}\n"
     string += f"L2,0: {torch.cat(results[6]).mean().item()}\n"
@@ -408,6 +463,9 @@ def write_untargeted_results(results, file):
 
 
 def write_targeted_results(results, file):
+    '''
+    Writes results in a file.
+    '''
     string = f"L0: best: {torch.cat(results[0][0]).mean().item()}, avg: {torch.cat(results[0][1]).mean().item()}, worst: {torch.cat(results[0][2]).mean().item()}\n"
     string += f"L2: best: {torch.cat(results[5][0]).mean().item()}, avg: {torch.cat(results[5][1]).mean().item()}, worst: {torch.cat(results[5][2]).mean().item()}\n"
     string += f"L2,0: best: {torch.cat(results[6][0]).mean().item()}, avg: {torch.cat(results[6][1]).mean().item()}, worst: {torch.cat(results[6][2]).mean().item()}\n"
