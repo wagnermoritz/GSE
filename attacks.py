@@ -780,6 +780,15 @@ class HomotopyAttack(Attack):
 
 
     def __call__(self, x, y):
+        '''
+        Performs the attack.
+
+        args:
+        x:   Tensor of shape [B, C, H, W], batch of images.
+        y:   Tensor of shape [B], batch of labels.
+
+        Returns a tensor of the same shape as x containing adversarial examples
+        '''
         result = x.clone().cpu()
         for i, (x_, y_) in enumerate(zip(x, y)):
             if self.ver:
