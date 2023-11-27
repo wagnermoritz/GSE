@@ -86,7 +86,7 @@ def countClusters(pertmask):
 
 def DFS(notdiscovered, intmask, i):
     '''
-    Performs DFS on a perturbation by treating adjascent non-zero pixels as
+    Performs DFS on a perturbation by treating adjacent non-zero pixels as
     neighboring nodes of a graph.
     '''
     neighbors = [[-1, -1], [-1, 0], [-1, 1], [0, -1], [0, 1], [1, -1], [1, 0], [1, 1]]
@@ -108,7 +108,7 @@ def DFS(notdiscovered, intmask, i):
 
 def ASM(model, x, t, t0, device):
     '''
-    Computed the adversarial saliancy map of the given model at x wrt target
+    Computes the adversarial saliency map of the given model at x wrt target
     label t and true label t0.
     '''
     x.requires_grad = True
@@ -129,7 +129,7 @@ def ASM(model, x, t, t0, device):
 
 def ASM_percentile(asm, P, device):
     '''
-    Returns a list of Pth percentiles for all adversarial saliancy maps in the
+    Returns a list of Pth percentiles for all adversarial saliency maps in the
     batch asm.
     '''
     asm = asm.view(asm.size(0), -1)
@@ -192,8 +192,8 @@ def CAM(model1, model2, x, y):
 
 def loadImages(image_files, labels, targets, path_to_images):
     '''
-    Loads images from the paths given in the list image files and returns the
-    images, labels and targets as tensors.
+    Loads images from the paths given in the list of image files and returns the
+    images, labels, and targets as tensors.
     '''
     labels = torch.tensor(labels).long()
     targets = torch.tensor(targets).long()
