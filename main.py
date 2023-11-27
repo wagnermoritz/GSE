@@ -107,7 +107,7 @@ if __name__ == "__main__":
     write_untargeted_results(results, dir_str + 'Outputs/Table1/GSE_untargeted.txt')
 
     # targeted
-    dataloader = getCIFARDataloader(dir_str + 'Saves/Data/', 11)
+    dataloader = getCIFARDataloader(dir_str + 'Saves/Data/CIFAR10/', 11)
     results = test_targeted(HomotopyAttack(modelCIFAR, targeted=True, dec_factor=0.8, val_c=1e-1, val_w1=1e-3,
                                            val_w2=1e-5, val_gamma=0.96, beta=1e-1, iter_init=50,
                                            iter_inc=[100, 200, 300, 400, 500], n_segments=100),
