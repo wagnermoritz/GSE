@@ -475,7 +475,7 @@ def write_targeted_results(results, file):
     string += f"Time: best: {results[4]}\n\n"
 
     string += "Percentile vs interpretability score:\nP, IS\n"
-    for p, ISres in zip([30, 40, 50, 60, 70, 80, 90], results[7]):
+    for p, ISres in zip([50, 60, 70, 80, 90], results[7]):
         string += f"{p}, {ISres.mean().item()}\n"
 
     with open(file, 'w') as f:
