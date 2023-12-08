@@ -483,6 +483,108 @@ class FWnucl(Attack):
 
         return pert
 
+#################################### SAIF #####################################
+
+class SAIF(Attack):
+    def __init__(self, model, targeted, img_range = (0, 1), steps: = 200,
+                 r0 = 1, ver = False):
+        '''
+        Implementation of the sparse Frank-Wolfe attack SAIF
+        https://arxiv.org/pdf/2212.07495.pdf
+
+        args:
+        model:         Callable, PyTorch classifier.
+        img_range:     Tuple of ints/floats, lower and upper bound of image
+                       entries.
+        targeted:      Bool, given label is used as a target label if True.
+        steps:         Int, number of FW iterations.
+        r0:            Int, parameter for step size computation.
+        ver:           Bool, print progress if True.
+        '''
+        super().__init__(model, targeted=targeted, img_range=img_range)
+        self.steps = steps
+        self.r0 = r0
+        self.loss_fn = torch.nn.CrossEntropyLoss()
+        self.ver = ver
+
+
+    def __call__(self, x, y, k = 25, eps = 1.0):
+        '''
+        Perform the  attack on a batch of images x.
+
+        args:
+        x:   Tensor of shape [B, C, H, W], batch of images.
+        y:   Tensor of shape [B], batch of labels.
+        k:   Int, sparsity parameter,
+        eps: Float, perturbation magnitude parameter.
+
+        Returns a tensor of the same shape as x containing adversarial examples.
+        '''
+        B, C, H, W = x.shape
+        x = x.to(self.device)
+        y = y.to(self.device)
+        batchidx = torch.arange(B).view(-1, 1)
+
+        # compute p_0 and s_0
+        x_ = x.clone()
+        x_.requires_grad = True
+        out = self.model(x_)
+        loss = -self.loss_fn(out, y)
+        loss.backward()
+        p = -eps * x_.grad.sign()
+        p = p.detach()
+        ksmallest = torch.topk(-x_.grad.view(B, -1), k, dim=1)[1]
+        ksmask = torch.zeros((B, C * H * W), device=self.device)
+        ksmask[batchidx, ksmallest] = 1
+        s = ksmask.view(B, C, H, W).detach().float()
+
+        r = self.r0
+
+        for t in range(self.steps):
+            if self.ver:
+                print(f'\r Iteration {t+1}/{self.steps}', end='')
+            p.requires_grad = True
+            s.requires_grad = True
+
+            D = self.Dtadv(x, s, p, y)
+            D.backward()
+            mp = p.grad
+            ms = s.grad
+
+            with torch.no_grad():
+                # inf-norm LMO
+                v = - eps * mp.sign()
+
+                # 1-norm LMO
+                ksmallest = torch.topk(-ms.view(B, -1), k, dim=1)[1]
+                ksmask = torch.zeros((B, C * H * W), device=self.device)
+                ksmask[batchidx, ksmallest] = 1
+                ksmask = ksmask.view(B, C, H, W)
+                z = torch.logical_and(ksmask, ms < 0).float()
+
+                # update stepsize until primal progress is made
+                mu = 1 / (2 ** r * math.sqrt(t + 1))
+                while self.Dtadv(x, s + mu * (z - s), p + mu * (v - p), y) > D:
+                    r += 1
+                    mu = 1 / (2 ** r * math.sqrt(t + 1))
+
+                p = p + mu * (v - p)
+                s = s + mu * (z - s)
+
+                x_adv = torch.clamp(x + p, *self.img_range)
+                p = x_adv - x
+
+        if self.ver
+            print('')
+        return (x + s * p).detach()
+
+
+    def Dtadv(self, x, s, p, y):
+        out = self.model(x + s * p)
+        if self.targeted:
+            return self.loss_fn(out, y)
+        else:
+            return -self.loss_fn(out, y)
 
 ################################## StrAttack ##################################
 
