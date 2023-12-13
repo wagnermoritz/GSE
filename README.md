@@ -1,5 +1,5 @@
 # GSE
-This repository contains the code for the paper "Group-wise Sparse and Explainable Adversarial Attack" (https://arxiv.org/abs/2311.17434).
+This repository contains the code for the paper "Group-wise Sparse and Explainable Adversarial Attacks" (https://arxiv.org/abs/2311.17434).
 
 ## Setup
 To run this code:
