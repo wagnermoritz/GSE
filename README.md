@@ -17,3 +17,5 @@ The NIPS2017 data set can be found at https://www.kaggle.com/competitions/nips-2
 The `main.py` file contains the code for the main experiments. It can split the data set into chunks for 'embarrassingly parallel' execution.
 For example to run a targeted test for GSE and a ResNet20 on images 1000-1999 of the CIFAR10 test set with a batch size of 500, execute
   `python main.py --dataset 'CIFAR10' --model 'ResNet20' --numchunks 10 --chunk 1 --batchsize 500 --attack 'GSE' --targeted 1`
+
+When all experiments are finished, execute `process_results.py` to combine the results corresponding to the same experiment.
