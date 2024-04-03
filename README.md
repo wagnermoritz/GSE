@@ -2,16 +2,9 @@
 This repository contains the code for the paper "Group-wise Sparse and Explainable Adversarial Attacks" (https://arxiv.org/abs/2311.17434).
 
 ## Setup
-Dependencies:
-- `numpy`
-- `torch`
-- `torchvision`
-- `natsort`
-- `pandas`
-- `matplotlib`
-- `skimage`
+Dependencies: `numpy`, `torch`, `torchvision`, `natsort`, `pandas`, `matplotlib`, `skimage`
   
-The NIPS2017 data set can be found at https://www.kaggle.com/competitions/nips-2017-defense-against-adversarial-attack/data .
+The NIPS2017 data set can be found at https://www.kaggle.com/competitions/nips-2017-defense-against-adversarial-attack/data.
 Since the .pt files containing the weights for the ResNet50 CAM and the WideResNet are over the limit of 100MB, they are not included in this repository.
 
 ## Run main
