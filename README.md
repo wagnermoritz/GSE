@@ -10,8 +10,10 @@ Dependencies:
 - `pandas`
 - `matplotlib`
 - `skimage`
-- `pytorch_resnet_cifar10` (https://github.com/akamaster/pytorch_resnet_cifar10)
   
-To run this code:
-- Download the NIPS2017 data set (https://www.kaggle.com/competitions/nips-2017-defense-against-adversarial-attack/data) and extract it to Saves/Data/NIPS2017/.
-- Add the images you want to use for figures 1, 2, and 3 to Saves/Data/images/, and update the lists 'imgfiles', 'imglabels', and 'imgtargets' in main.py accordingly.
+The NIPS2017 data set can be found at https://www.kaggle.com/competitions/nips-2017-defense-against-adversarial-attack/data .
+
+## Run main
+The `main.py` file contains the code for the main experiments. It can split the data set into chunks for 'embarrassingly parallel' execution.
+For example to run a targeted test for GSE and a ResNet20 on images 1000-1999 of the CIFAR10 test set with a batch size of 500, execute
+  `python main.py --dataset 'CIFAR10' --model 'ResNet20' --numchunks 10 --chunk 1 --batchsize 500 --attack 'GSE' --targeted 1`
