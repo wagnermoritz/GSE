@@ -11,7 +11,7 @@ input_dir = './Images'
 output_dir = './Examples'
 imgfiles = ['list of image file names. e.g.', 'myimage.png']
 imglabels = ['list of labels as int']
-imgtargets = ['list of targets as int]
+imgtargets = ['list of targets as int']
 
 if __name__ == "__main__":
     os.makedirs("./Examples", exist_ok=True)
