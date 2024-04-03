@@ -1,0 +1,161 @@
+{
+    "GSE":{
+        "targeted":{
+            "ImageNet":{
+                "mu": 0.1,
+                "beta": 0.025,
+                "k_hat": 2,
+                "q": 0.95
+            },
+            "CIFAR10":{
+                "mu": 1.0,
+                "beta": 0.025,
+                "k_hat": 2,
+                "q": 0.1
+            }
+        },
+        "untargeted":{
+            "ImageNet":{
+                "mu": 0.1,
+                "beta": 0.025,
+                "k_hat": 2,
+                "q": 0.95
+            },
+            "CIFAR10":{
+                "mu": 1.0,
+                "beta": 0.025,
+                "k_hat": 2,
+                "q": 0.1
+            }
+        }
+    },
+
+    "StrAttack":{
+        "targeted":{
+            "ImageNet":{
+                "c": 2.5,
+                "search_steps": 8,
+                "max_c": 1e10,
+                "rho": 1
+            },
+            "CIFAR10":{
+                "c": 0.25,
+                "search_steps": 8,
+                "max_c": 1e10,
+                "rho": 1
+            }
+        },
+        "untargeted":{
+            "ImageNet":{
+                "c": 2.5,
+                "search_steps": 8,
+                "max_c": 1e10,
+                "rho": 1
+            },
+            "CIFAR10":{
+                "c": 0.25,
+                "search_steps": 8,
+                "max_c": 1e10,
+                "rho": 1
+            }
+        }
+    },
+
+    "Homotopy":{
+        "targeted":{
+            "ImageNet":{
+                "dec_factor": 0.98,
+                "val_c": 1e-2,
+                "val_w1": 1e-1,
+                "val_w2": 1e-3,
+                "val_gamma": 0.8,
+                "beta": 1e-2,
+                "iter_init": 50,
+                "iter_inc": [500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 5500, 6000],
+                "n_segments": 500
+            },
+            "CIFAR10":{
+                "dec_factor": 0.9,
+                "val_c": 1e-1,
+                "val_w1": 1e-3,
+                "val_w2": 1e-5,
+                "val_gamma": 0.96,
+                "beta": 1e-1,
+                "iter_init": 50,
+                "iter_inc": [100, 200, 300, 400, 500],
+                "n_segments": 100
+            }
+        },
+        "untargeted":{
+            "ImageNet":{
+                "dec_factor": 0.98,
+                "val_c": 1e-2,
+                "val_w1": 1e-1,
+                "val_w2": 1e-3,
+                "val_gamma": 0.8,
+                "beta": 1e-2,
+                "iter_init": 50,
+                "iter_inc": [500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 5500, 6000],
+                "n_segments": 500
+            },
+            "CIFAR10":{
+                "dec_factor": 0.9,
+                "val_c": 1e-1,
+                "val_w1": 1e-3,
+                "val_w2": 1e-5,
+                "val_gamma": 0.96,
+                "beta": 1e-1,
+                "iter_init": 50,
+                "iter_inc": [100, 200, 300, 400, 500],
+                "n_segments": 100
+            }
+        }
+    },
+
+    "FWnucl":{
+        "targeted":{
+            "ImageNet":{
+                "eps": 5
+            },
+            "CIFAR10":{
+                "eps": 5
+            }
+        },
+        "untargeted":{
+            "ImageNet":{
+                "eps": 5
+            },
+            "CIFAR10":{
+                "eps": 5
+            }
+        }
+    },
+
+    "SAIF":{
+        "targeted":{
+            "ImageNet":{
+                "r0": 1,
+                "k": 500,
+                "eps": 1.0
+            },
+            "CIFAR10":{
+                "r0": 1,
+                "k": 50,
+                "eps": 1.0
+            }
+        },
+        "untargeted":{
+            "ImageNet":{
+                "r0": 1,
+                "k": 50,
+                "eps": 1.0
+            },
+            "CIFAR10":{
+                "r0": 1,
+                "k": 25,
+                "eps": 1.0
+            }
+        }
+    }
+
+}

@@ -1,17 +1,15 @@
 import torch
 import torch.utils.data
-import torch.nn as nn
 from torch.nn import functional as F
 import torchvision
 from torch.utils.data import Dataset
-from torchvision import datasets, transforms
+from torchvision import transforms
 import time
 import random
 import math
 from PIL import Image
 import os
 import natsort
-import pandas as pd
 import matplotlib.pyplot as plt
 
 
@@ -34,40 +32,6 @@ class CustomDataSet(Dataset):
         image = Image.open(img_loc).convert("RGB")
         tensor_image = self.transform(image)
         return (tensor_image, self.labels['TrueLabel'][idx] - 1)
-    
-
-def getNIPSDataloader(data_path, b_size):
-    '''
-    Returns a dataloader for the NIPS2017 dataset using a CustomDataSet object.
-    '''
-    imagenet_transform = transforms.Compose([transforms.Resize(256, antialias=None),
-                                        transforms.ToTensor(),
-                                        transforms.Normalize([.5, .5, .5],
-                                                            [.5, .5, .5])])
-
-    NIPSlabels = pd.read_csv(data_path + 'images.csv')
-    NIPSdataset = CustomDataSet(data_path + 'images',
-                                transform=imagenet_transform,
-                                labels=NIPSlabels)
-
-    dataloader = torch.utils.data.DataLoader(NIPSdataset, batch_size=b_size,
-                                             shuffle=True)
-    
-    return dataloader
-
-    
-def getCIFARDataloader(data_path, b_size, download=False):
-    '''
-    Returns a dataloader for the CIFAR10 dataset.
-    '''
-    normalize = transforms.Normalize([.5, .5, .5], [.5, .5, .5])
-    dataloader = torch.utils.data.DataLoader(
-        datasets.CIFAR10(root=data_path, train=False, download=download,
-                         transform=transforms.Compose([transforms.ToTensor(),
-                                                       normalize])),
-        batch_size=b_size, shuffle=True, num_workers=2, pin_memory=True)
-    
-    return dataloader
 
 
 def countClusters(pertmask):
@@ -89,7 +53,8 @@ def DFS(notdiscovered, intmask, i):
     Performs DFS on a perturbation by treating adjacent non-zero pixels as
     neighboring nodes of a graph.
     '''
-    neighbors = [[-1, -1], [-1, 0], [-1, 1], [0, -1], [0, 1], [1, -1], [1, 0], [1, 1]]
+    #neighbors = [[-1, -1], [-1, 0], [-1, 1], [0, -1], [0, 1], [1, -1], [1, 0], [1, 1]]
+    neighbors = [[-1, 0], [0, -1], [0, 1], [1, 0]]
     nonzeroidxs = torch.nonzero(notdiscovered, as_tuple=True)
     rnd = random.randint(0, len(nonzeroidxs[0])-1)
     start = [idx[rnd] for idx in nonzeroidxs]
@@ -156,22 +121,6 @@ def IS(model, x, y, delta, P, t, device):
     return torch.norm(x_asm * delta, p=2, dim=(1, 2, 3)) / torch.norm(delta, p=2, dim=(1, 2, 3))
 
 
-class CAMNet(nn.Module):
-    '''
-    Class for the last fully connected layer of CNNs used for computing the
-    class activation map.
-    '''
-    def __init__(self, numclasses=1000, latent_dim=512):
-        super().__init__()
-        self.fc = nn.Linear(latent_dim, numclasses, bias=False)
-
-    def forward(self, x):
-        sh = x.shape
-        x = x.view(*sh[:2], sh[2] * sh[3]).mean(-1).view(sh[0], -1)
-        x = self.fc(x)
-        return F.softmax(x, dim=1)
-
-
 def CAM(model1, model2, x, y):
     '''
     Computes the class activation map of the CNN model2 with the last fully
@@ -201,7 +150,7 @@ def loadImages(image_files, labels, targets, path_to_images):
     trf = transforms.Compose([transforms.Resize((256, 256), antialias=None),
                             transforms.Normalize([.5, .5, .5], [.5, .5, .5])])
     for imf in image_files:
-        x = Image.open(path_to_images + imf)
+        x = Image.open(path_to_images + imf).convert('RGB')
         x = transforms.ToTensor()(x)
         x = trf(x)
         images.append(x.clone())
@@ -211,49 +160,53 @@ def loadImages(image_files, labels, targets, path_to_images):
     return images, labels, targets
 
 
-def extract_patches(x, size=8):
+def extract_patches(x, n=8):
     '''
     Extracts all n by n pixel patches from every image in the batch x.
     '''
     B, C, H, W = x.shape
 
-    kernel = torch.zeros((size ** 2, size ** 2))
-    kernel[range(size**2), range(size**2)] = 1.0
-    kernel = kernel.view(size**2, 1, size, size)
+    kernel = torch.zeros((n ** 2, n ** 2))
+    kernel[range(n**2), range(n**2)] = 1.0
+    kernel = kernel.view(n**2, 1, n, n)
     kernel = kernel.repeat(C, 1, 1, 1).to(x.device)
 
     out = F.conv2d(x, kernel, groups=C)
-    out = out.view(B, C, size, size, -1)
+    out = out.view(B, C, n, n, -1)
     out = out.permute(0, 4, 1, 2, 3)
     return out.contiguous()
 
 
-def d_2_0(x, size=8):
+def d_2_0(x, n=8):
     '''
     Computed the value of the d_2_0 function, i.e. the number of non-zero
     n by n patches in each image in the batch x.
     '''
     l20s = []
     for x_ in x:
-        patches = extract_patches(x_.unsqueeze(0), size)
+        patches = extract_patches(x_.unsqueeze(0), n)
         l2s = torch.norm(patches, p=2, dim=(2, 3, 4))
         l20s.append((l2s != 0).float().sum().item())
     return torch.tensor(l20s)
 
 
-def test_targeted(attack, dataloader, labeloffsets, numclasses, num_batches):
+def test_targeted(attack, dataloader, labeloffsets, numclasses, num_batches=None):
     '''
     Evaluates a given targeted attack in terms of ASR, sparsity, number of
-    clusters, 2-norm, d_2_0 value, each for best, average, and worst case, and
-    interpretability scores and computation time.
+    clusters, 2-norm, d_2_0 value (each for best, average, and worst case),
+    interpretability scores, and computation time.
+    Best, average, and worst case are computed for each image over all the corr.
+    targeted adv. examples with targets (target+labeloffsets[i])%numcalsses.
     '''
     percentiles = [50, 60, 70, 80, 90]
     IS_scores = [[] for _ in percentiles]
-    l0s3 = [[], [], []]
-    l2s3 = [[], [], []]
-    l20s3 = [[], [], []]
-    clusters3 = [[], [], []]
-    successes3 = [[], [], []]
+
+    # lists for saving best, average, and worst case for every sample
+    l0_baw = [[], [], []]
+    l2_baw = [[], [], []]
+    l20_baw = [[], [], []]
+    clusters_baw = [[], [], []]
+    successes_baw = [[], [], []]
     total_time = 0
     n = 0
     device = attack.device
@@ -264,6 +217,7 @@ def test_targeted(attack, dataloader, labeloffsets, numclasses, num_batches):
     for i, (batch, labels) in enumerate(dataloader):
         if i == num_batches:
             break
+        # only consider benign samples that are classified correctly
         mask = (torch.argmax(attack.model(batch.to(device)), dim=1).cpu() == labels)
         batch = batch[mask]
         labels = labels[mask]
@@ -286,83 +240,63 @@ def test_targeted(attack, dataloader, labeloffsets, numclasses, num_batches):
             total_time += after - before
 
             mask = (torch.argmax(attack.model(x_adv), dim=1) == (y+offs)%numclasses)
-
-            successes.append(mask)
-            mask = torch.logical_not(mask)
+            successes.append(mask.cpu())
 
             l0s.append(torch.norm((x_adv - x).abs().mean(1), p=0, dim=(1,2)).cpu())
             l2s.append(torch.norm((x_adv - x), p=2, dim=(1,2,3)).cpu())
             l20s.append(d_2_0(x_adv - x).cpu())
-            l0s[-1][mask] = 1e10
-            l2s[-1][mask] = 1e10
-            l20s[-1][mask] = 1e10
             clusters.append(torch.tensor([countClusters((x_adv.cpu() - x.cpu())[idx].abs().mean(0)!=0).max().int().item() for idx in range(len(x))]))
-            clusters[-1][mask] = 1e10
 
             for j, P in enumerate(percentiles):
                 IS_scores[j].append(IS(attack.model, x.detach(), y.detach(), (x_adv - x).detach(), P, (y+offs)%numclasses, device))
 
-        Tsucc = torch.stack(successes, dim=0).cpu()
+        # best, average, and worst case for attack success
+        Tsucc = torch.stack(successes, dim=0)
         Tbestsucc = torch.max(Tsucc, dim=0)[0]
         Tworstsucc = torch.min(Tsucc, dim=0)[0]
-        successes3[0].append(Tbestsucc)
-        successes3[1].append(Tsucc.float())
-        successes3[2].append(Tworstsucc)
+        successes_baw[0].append(Tbestsucc)
+        successes_baw[1].append(Tsucc.float().reshape(-1))
+        successes_baw[2].append(Tworstsucc)
 
-        def getCases(t):
+        def getCases(t, baw):
             T = torch.stack(t, dim=0)
-            Tbest = torch.min(T, dim=0)[0]
-            T = torch.where(T > 1e9, torch.full_like(T, -1e10), T)
-            Tworst = torch.max(T, dim=0)[0]
-            mask = T > -1e9
-            T = T[torch.logical_and(mask, successes3[1][-1])]
-            mask = Tbest < 1e9
-            Tbest = Tbest[torch.logical_and(mask, successes3[0][-1])]
-            Tworst = Tworst[torch.logical_and(mask, successes3[2][-1])]
+            # for the best case, take the best successful attack or nothing if
+            # there is no successful attack
+            Tbest = torch.min(torch.where(Tsucc.bool(), T, torch.full_like(T, 1e9)), dim=0)[0]
+            Tbest = Tbest[Tbestsucc.bool()].reshape(-1)
+            # for the worst case, take the worst attack or nothing if at least
+            # one attack was not successful
+            Tworst = torch.max(T, dim=0)[0][Tworstsucc.bool()].reshape(-1)
+            T = T.reshape(-1)
 
-            return Tbest, T.float(), Tworst
+            if len(Tbest):
+                baw[0].append(Tbest)
+            baw[1].append(T)
+            if len(Tworst):
+                baw[2].append(Tworst)
 
-        tmp = getCases(l0s)
-        if len(tmp[0]):
-            l0s3[0].append(tmp[0])
-        l0s3[1].append(tmp[1])
-        if len(tmp[2]):
-            l0s3[2].append(tmp[2])
-
-        tmp = getCases(l2s)
-        if len(tmp[0]):
-            l2s3[0].append(tmp[0])
-        l2s3[1].append(tmp[1])
-        if len(tmp[2]):
-            l2s3[2].append(tmp[2])
-
-        tmp = getCases(l20s)
-        if len(tmp[0]):
-            l20s3[0].append(tmp[0])
-        l20s3[1].append(tmp[1])
-        if len(tmp[2]):
-            l20s3[2].append(tmp[2])
-
-        tmp = getCases(clusters)
-        if len(tmp[0]):
-            clusters3[0].append(tmp[0])
-        clusters3[1].append(tmp[1])
-        if len(tmp[2]):
-            clusters3[2].append(tmp[2])
+            return baw
+        
+        # best, average, worst case for all other metrics depending on
+        # the success of the attack
+        l0_baw = getCases(l0s, l0_baw)
+        l2_baw = getCases(l2s, l2_baw)
+        l20_baw = getCases(l20s, l20_baw)
+        clusters_baw = getCases(clusters, clusters_baw)
 
     IS_scores = [torch.cat(score) for score in IS_scores]
 
     for i in range(3):
-        if not len(l0s3[i]):
-            l0s3[i].append(torch.tensor([torch.nan]))
-            l2s3[i].append(torch.tensor([torch.nan]))
-            l20s3[i].append(torch.tensor([torch.nan]))
-            clusters3[i].append(torch.tensor([torch.nan]))
+        if not len(l0_baw[i]):
+            l0_baw[i].append(torch.tensor([torch.nan]))
+            l2_baw[i].append(torch.tensor([torch.nan]))
+            l20_baw[i].append(torch.tensor([torch.nan]))
+            clusters_baw[i].append(torch.tensor([torch.nan]))
+    
+    return l0_baw, clusters_baw, successes_baw, total_time, l2_baw, l20_baw, IS_scores, n
 
-    return l0s3, clusters3, successes3, total_time / n, l2s3, l20s3, IS_scores
 
-
-def test_untargeted(attack, dataloader, num_batches):
+def test_untargeted(attack, dataloader, num_batches=None):
     '''
     Evaluates a given untargeted attack in terms of ASR, sparsity, number of
     clusters, 2-norm, d_2_0 value, and computation time.
@@ -376,6 +310,9 @@ def test_untargeted(attack, dataloader, num_batches):
     n = 0
     device = attack.device
 
+    if num_batches is None:
+        num_batches = len(dataloader)
+
     for i, (x, y) in enumerate(dataloader):
         if i == num_batches:
             break
@@ -383,6 +320,7 @@ def test_untargeted(attack, dataloader, num_batches):
         x = x.to(device)
         y = y.to(device)
 
+        # only consider benign samples that are classified correctly
         mask = (torch.argmax(attack.model(x), dim=1) == y)
         x = x[mask]
         y = y[mask]
@@ -393,11 +331,11 @@ def test_untargeted(attack, dataloader, num_batches):
         after = time.perf_counter()
 
         mask = (torch.argmax(attack.model(x_adv), dim=1) != y)
+        successes.append(mask)
 
         if not mask.any():
             continue
 
-        successes.append(mask)
         x = x[mask]
         x_adv = x_adv[mask]
 
@@ -407,7 +345,7 @@ def test_untargeted(attack, dataloader, num_batches):
         l20s.append(d_2_0(x_adv - x).cpu())
         clusters.append(torch.tensor([countClusters((x_adv.cpu() - x.cpu())[idx].abs().mean(0)!=0).max().int().item() for idx in range(len(x))]))
 
-    return l0s, clusters, successes, total_time / n, l2s, l20s
+    return l0s, clusters, successes, total_time, l2s, l20s, n
 
 
 def save_images(x_adv, x_cam, images, dir_str):
@@ -446,37 +384,60 @@ def save_images(x_adv, x_cam, images, dir_str):
         plt.savefig(dir_str + f'{i+1}_CAM.png', transparent = True, bbox_inches = 'tight', pad_inches = 0)
 
 
-def write_untargeted_results(results, file):
+def write_untargeted_results(results, filename):
     '''
     Writes results in a file.
     '''
-    string = f"L0: {torch.cat(results[0]).mean().item()}\n"
-    string += f"L2: {torch.cat(results[5]).mean().item()}\n"
-    string += f"L2,0: {torch.cat(results[6]).mean().item()}\n"
-    string += f"clusters: {torch.cat(results[1]).float().mean().item()}\n"
-    string += f"GB clusters: {torch.cat(results[2]).float().mean().item()}\n"
-    string += f"ASR: {torch.cat(results[3]).float().mean().item()}\n"
-    string += f"time: {results[4]}"
+    string = "L0, L2, L2_0, clusters, ASR\n"
+    for l0, l2, l20, cl, asr in zip(torch.cat(results[0]), torch.cat(results[4]),
+                                    torch.cat(results[5]), torch.cat(results[1]),
+                                    torch.cat(results[2])):
+        string += f"{l0}, {l2}, {l20}, {cl}, {asr}\n"
 
-    with open(file, 'w') as f:
+    with open(filename + "_results.txt", 'w') as f:
+        f.write(string)
+    with open(filename + "_time.txt", 'w') as f:
+        f.write(f"time: {results[3]}, number of samples: {results[6]}")
+
+
+def write_targeted_results(results, filename):
+    '''
+    Writes results in a file.
+    '''
+    string = "L0, L2, L2_0, clusters, ASR\n"
+    for l0, l2, l20, cl, asr in zip(torch.cat(results[0][0]), torch.cat(results[4][0]),
+                                    torch.cat(results[5][0]), torch.cat(results[1][0]),
+                                    torch.cat(results[2][0])):
+        string += f"{l0}, {l2}, {l20}, {cl}, {asr}\n"
+
+    with open(filename + "_results_best.txt", 'w') as f:
         f.write(string)
 
+    string = "L0, L2, L2_0, clusters, ASR\n"
+    for l0, l2, l20, cl, asr in zip(torch.cat(results[0][1]), torch.cat(results[4][1]),
+                                    torch.cat(results[5][1]), torch.cat(results[1][1]),
+                                    torch.cat(results[2][1])):
+        string += f"{l0}, {l2}, {l20}, {cl}, {asr}\n"
 
-def write_targeted_results(results, file):
-    '''
-    Writes results in a file.
-    '''
-    string = f"L0: best: {torch.cat(results[0][0]).mean().item()}, avg: {torch.cat(results[0][1]).mean().item()}, worst: {torch.cat(results[0][2]).mean().item()}\n"
-    string += f"L2: best: {torch.cat(results[5][0]).mean().item()}, avg: {torch.cat(results[5][1]).mean().item()}, worst: {torch.cat(results[5][2]).mean().item()}\n"
-    string += f"L2,0: best: {torch.cat(results[6][0]).mean().item()}, avg: {torch.cat(results[6][1]).mean().item()}, worst: {torch.cat(results[6][2]).mean().item()}\n"
-    string += f"Clusters: best: {torch.cat(results[1][0]).float().mean().item()}, avg: {torch.cat(results[1][1]).float().mean().item()}, worst: {torch.cat(results[1][2]).float().mean().item()}\n"
-    string += f"GB Clusters: best: {torch.cat(results[2][0]).float().mean().item()}, avg: {torch.cat(results[2][1]).float().mean().item()}, worst: {torch.cat(results[2][2]).float().mean().item()}\n"
-    string += f"ASR: best: {torch.cat(results[3][0]).float().mean().item()}, avg: {torch.cat(results[3][1]).float().mean().item()}, worst: {torch.cat(results[3][2]).float().mean().item()}\n"
-    string += f"Time: best: {results[4]}\n\n"
+    with open(filename + "_results_average.txt", 'w') as f:
+        f.write(string)
 
-    string += "Percentile vs interpretability score:\nP, IS\n"
-    for p, ISres in zip([50, 60, 70, 80, 90], results[7]):
-        string += f"{p}, {ISres.mean().item()}\n"
+    string = "L0, L2, L2_0, clusters, ASR\n"
+    for l0, l2, l20, cl, asr in zip(torch.cat(results[0][2]), torch.cat(results[4][2]),
+                                    torch.cat(results[5][2]), torch.cat(results[1][2]),
+                                    torch.cat(results[2][2])):
+        string += f"{l0}, {l2}, {l20}, {cl}, {asr}\n"
 
-    with open(file, 'w') as f:
+    with open(filename + "_results_worst.txt", 'w') as f:
+        f.write(string)
+
+    with open(filename + "_time.txt", 'w') as f:
+        f.write(f"time: {results[3]}, number of samples: {results[7]}")
+
+
+    string = "P50, P60, P70, P80, P90\n"
+    for p50, p60, p70, p80, p90 in zip(*results[6]):
+        string += f"{p50}, {p60}, {p70}, {p80}, {p90}\n"
+
+    with open(filename + "_IS.txt", 'w') as f:
         f.write(string)

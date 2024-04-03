@@ -32,10 +32,10 @@ class Attack(object):
 ##################################### GSE #####################################
 
 class GSEAttack(Attack):
-    def __init__(self, model, ver=False, img_range=(-1,1), search_steps=10,
-                 targeted=False, sequential=False, search_factor=0.5,
-                 gb_size=5, sgm=1, mu=1, beta=0.0025, iters=200, k_hat=30,
-                 q=0.25):
+    def __init__(self, model, *args, ver=False, img_range=(-1, 1), search_steps=10,
+                 targeted=False, sequential=False, search_factor=2,
+                 gb_size=5, sgm=1.5, mu=1, beta=0.0025, iters=200, k_hat=10,
+                 q=0.25, **kwargs):
         '''
         Implementation of the GSE attack.
 
@@ -59,6 +59,7 @@ class GSEAttack(Attack):
         beta:          Float, step size (sigma in paper)
         iters:         Int, number of iterations.
         k_hat:         Int, number of iterations before transitioning to NAG.
+        q:             Float, inverse of increase factor for adjust_lambda.
         '''
         super().__init__(model, img_range=img_range, targeted=targeted)
         self.ver = ver
@@ -74,45 +75,9 @@ class GSEAttack(Attack):
         self.q = q
 
 
-    def extract_patches(self, x):
+    def __adjust_lambda(self, lam, noise):
         '''
-        Extracts and returns all overlapping size by size patches from
-        the image batch x.
-        '''
-        B, C, _, _ = x.shape
-        size = 8
-
-        kernel = torch.zeros((size ** 2, size ** 2))
-        kernel[range(size**2), range(size**2)] = 1.0
-        kernel = kernel.view(size**2, 1, size, size)
-        kernel = kernel.repeat(C, 1, 1, 1).to(x.device)
-
-        out = F.conv2d(x, kernel, groups=C)
-        out = out.view(B, C, size, size, -1)
-        out = out.permute(0, 4, 1, 2, 3)
-        return out.contiguous()
-    
-
-    def d_2_0(self, x):
-        '''
-        Computes d_{2,0}(x[i]) for all perturbations x[i] in the batch x
-        as described in section 3.2.
-        '''
-        l20s = []
-        for x_ in x:
-            patches = self.extract_patches(x_.unsqueeze(0))
-            l2s = torch.norm(patches, p=2, dim=(2, 3, 4))
-            l20s.append((l2s != 0).float().sum().item())
-        return torch.tensor(l20s)
-
-
-    def compare(self, x, y):
-        return torch.equal(x, y) if self.targeted else not torch.equal(x, y)
-
-
-    def adjust_lambda(self, lam, noise):
-        '''
-        AdjustLambda from section 2.3.
+        Adjust trade-off parameters (lambda) to update search space.
         '''
         x = noise.detach().clone().abs().mean(dim=1, keepdim=True).sign()
         gb = torchvision.transforms.GaussianBlur((self.gb_size, self.gb_size),
@@ -123,13 +88,13 @@ class GSEAttack(Attack):
         return lam
 
 
-    def section_search(self, x, y, steps=50):
+    def __section_search(self, x, y, steps=50):
         '''
         Section search for finding the maximal lambda such that the
-        perturbation non-zero after the first iteration.
+        perturbation is non-zero after the first iteration.
         '''
         noise = torch.zeros_like(x, requires_grad=True)
-        loss = (self.f(x + noise, y).sum() + self.mu
+        loss = (self.__f(x + noise, y).sum() + self.mu
                 * torch.norm(noise, p=2, dim=(1,2,3)).sum())
         loss.backward()
         grad = noise.grad
@@ -140,26 +105,26 @@ class GSEAttack(Attack):
         lb = torch.zeros((y.size(0),), dtype=torch.float,
                          device=self.device).view(-1, 1, 1)
         ub = lb.clone() + 0.001
-        mask = torch.norm(self.prox(grad.clone() * self.beta,
-                                    ones * ub * self.beta),
+        mask = torch.norm(self.__prox(grad.clone() * self.beta,
+                                      ones * ub * self.beta),
                           p=0, dim=(1,2,3)) != 0
         while mask.any():
             ub[mask] *= 2
-            mask = torch.norm(self.prox(grad.clone() * self.beta,
-                                        ones * ub * self.beta),
+            mask = torch.norm(self.__prox(grad.clone() * self.beta,
+                                          ones * ub * self.beta),
                               p=0, dim=(1,2,3)) != 0
 
         # perform search
         for _ in range(steps):
             cur = (ub + lb) / 2
-            mask = torch.norm(self.prox(grad.clone() * self.beta,
-                                        ones * cur * self.beta),
+            mask = torch.norm(self.__prox(grad.clone() * self.beta,
+                                          ones * cur * self.beta),
                               p=0, dim=(1,2,3)) == 0
             ub[mask] = cur[mask]
             mask = torch.logical_not(mask)
             lb[mask] = cur[mask]
 
-        return ((ub + lb) / 2).view(-1)
+        return (lb + ub).view(-1) / 2
 
 
     def __call__(self, x, y):
@@ -176,24 +141,24 @@ class GSEAttack(Attack):
         if self.sequential:
             result = x.clone()
             for i, (x_, y_) in enumerate(zip(x, y)):
-                result[i] = self.perform_att(x_.unsqueeze(0),
+                result[i] = self.__perform_att(x_.unsqueeze(0),
                                              y_.unsqueeze(0),
                                              mu=self.mu, beta=self.beta,
                                              k_hat=self.k_hat).detach()
             return result
         else:
-            return self.perform_att(x, y, mu=self.mu, beta=self.beta,
+            return self.__perform_att(x, y, mu=self.mu, beta=self.beta,
                                     k_hat=self.k_hat)
 
 
-    def perform_att(self, x, y, mu, beta, k_hat):
+    def __perform_att(self, x, y, mu, beta, k_hat):
         '''
         Perform GSI attack on a batch of images x with corresponding labels y.
         '''
         x = x.to(self.device)
         y = y.to(self.device)
         B, C, _, _ = x.shape
-        lams = self.section_search(x, y)
+        lams = self.__section_search(x, y)
         # save x, y, and lams for resetting them at the beginning of every
         # section search step
         save_x = x.clone()
@@ -202,20 +167,28 @@ class GSEAttack(Attack):
         # upper and lower bounds for section learch
         ub_lams = torch.full_like(lams, torch.inf)
         lb_lams = torch.full_like(lams, 0.0)
+        # tensor for saving succesful adversarial examples in inner loop
         result = x.clone()
+        # tensor for saving best adversarial example so far
         result2 = x.clone()
-        best_l20 = torch.full((B,), torch.inf, device=self.device).float()
+        best_l0 = torch.full((B,), torch.inf, device=self.device).type(x.type())
 
+        # section search
         for step in range(self.search_steps):
             x = save_x.clone()
             y = save_y.clone()
             lams = save_lams.clone()
             lam = torch.ones_like(x)[:, 0, :, :] * lams.view(-1, 1, 1)
+            # tensor for tracking for which images adv. examples have been found
             active = torch.ones(B, dtype=bool, device=self.device)
+            # set initial perturbation to zero
             noise = torch.zeros_like(x, requires_grad = True)
-            noise_old = noise.clone()
-            lr = 1
+            # epsilon for numerical stability of AdaGrad update
+            eps = torch.full_like(x, 1e-9)
+            # tensor for accumulating squared gradients for AdaGrad
+            G = torch.zeros_like(noise)
 
+            # attack
             for j in range(self.iters):
                 if self.ver:
                     print(f'\rSearch step {step + 1}/{self.search_steps}, ' +
@@ -225,36 +198,30 @@ class GSEAttack(Attack):
                     break
 
                 self.model.zero_grad()
-                loss = (self.f(x + noise, y).sum() + mu
-                        * torch.norm(noise, p=2, dim=(1,2,3)).sum())
+                loss = (self.__f(x + noise, y).sum() + mu
+                        * (torch.norm(noise, p=2, dim=(1,2,3)) ** 2).sum())
                 loss.backward()
 
                 with torch.no_grad():
-                    lr_ = (1 + math.sqrt(1 + 4 * lr**2)) / 2
-                    if j == k_hat:
+                    # update search space
+                    if j % k_hat == 0 or j < 10:
+                        noise_ = noise - noise.grad.data
+                        noise_ = self.__prox(noise_, lam)
+                        lam = self.__adjust_lambda(lam, noise_)
                         lammask = (lam > lams.view(-1, 1, 1))[:, None, :, :]
                         lammask = lammask.repeat(1, C, 1, 1)
-                        noise_old = noise.clone()
-                    if j < k_hat:
-                        noise = noise - beta * noise.grad.data
-                        noise = self.prox(noise, lam * beta)
-                        noise_tmp = noise.clone()
-                        noise = lr / lr_ * noise + (1 - (lr/ lr_)) * noise_old
-                        noise_old = noise_tmp.clone()
-                        lam = self.adjust_lambda(lam, noise)
-                    else:
-                        noise = noise - beta * noise.grad.data
-                        noise_tmp = noise.clone()
-                        noise = lr / lr_ * noise + (1 - (lr/ lr_)) * noise_old
-                        noise_old = noise_tmp.clone()
-                        noise[lammask] = 0
 
+                    # AdaGrad update
+                    G += noise.grad.data ** 2
+                    noise = noise - (beta / torch.sqrt(G + eps)) * noise.grad.data
+                    noise[lammask] = 0
 
+                    # clamp adv. example to valid range
                     x_adv = torch.clamp(x + noise, *self.img_range)
                     noise = x_adv - x
-                    lr = lr_
-                    preds = torch.argmax(self.model(x_adv), dim=1)
 
+                    # save all succesful adv. examples and stop optimizing them
+                    preds = torch.argmax(self.model(x_adv), dim=1)
                     mask = preds == y if self.targeted else preds != y
                     if mask.any():
                         tmp = result[active]
@@ -262,29 +229,28 @@ class GSEAttack(Attack):
                         result[active] = tmp
                         mask = torch.logical_not(mask)
                         active[active.clone()] = mask
-                        x, y, noise = x[mask], y[mask], noise[mask]
-                        lams, lam = lams[mask], lam[mask]
-                        noise_old = noise_old[mask]
-                        if j >= k_hat:
-                            lammask = lammask[mask]
+                        x, y, noise, G = x[mask], y[mask], noise[mask], G[mask]
+                        lams, lam, lammask = lams[mask], lam[mask], lammask[mask]
+                        eps = eps[mask]
 
                 noise.requires_grad = True
 
+            # section search
+            # no adv. example found => decrease upper bound and current lambda
+            # adv. example found => save it if the "0-norm" is better than of the
+            # previous adv. example, increase lower bound and current lambda
             for i in range(B):
                 if active[i]:
-                    if lb_lams[i] == 0.0:
-                        ub_lams[i] = save_lams[i]
-                        save_lams[i] *= self.search_factor
-                    else:
-                        ub_lams[i] = save_lams[i]
-                        save_lams[i] = (lb_lams[i] + save_lams[i]) / 2
+                    ub_lams[i] = save_lams[i]
+                    save_lams[i] = (ub_lams[i] + save_lams[i]) / 2
                 else:
-                    l20 = self.d_2_0(result[i].unsqueeze(0)).to(self.device)
-                    if l20 <= best_l20[i]:
+                    l0 = (result[i] - save_x[i]).abs().mean(dim=0).norm(p=0)
+                    if l0 < best_l0[i]:
+                        best_l0[i] = l0
                         result2[i] = result[i].clone()
                     if torch.isinf(ub_lams[i]):
                         lb_lams[i] = save_lams[i]
-                        save_lams[i] /= self.search_factor
+                        save_lams[i] *= self.search_factor
                     else:
                         lb_lams[i] = save_lams[i]
                         save_lams[i] = (ub_lams[i] + save_lams[i]) / 2
@@ -294,7 +260,7 @@ class GSEAttack(Attack):
         return result2.detach()
 
 
-    def f(self, x, y, kappa=0):
+    def __f(self, x, y, kappa=0):
         '''
         CW loss function
         '''
@@ -308,7 +274,7 @@ class GSEAttack(Attack):
             return F.relu(Z_t - Z_i + kappa)
 
 
-    def prox(self, grad_loss_noise, lam):
+    def __prox(self, grad_loss_noise, lam):
         '''
         Computes the proximal operator of the 1/2-norm of the gradient of the
         adversarial loss wrt current noise.
@@ -340,8 +306,8 @@ class GSEAttack(Attack):
 ################################### Fwnucl ####################################
 
 class FWnucl(Attack):
-    def __init__(self, model, iters=200, img_range=(-1, 1), ver=False,
-                 targeted=False, eps=5):
+    def __init__(self, model, *args, iters=200, img_range=(-1, 1), ver=False,
+                 targeted=False, eps=5, **kwargs):
         '''
         Implementation of the nuclear group norm attack.
 
@@ -360,7 +326,7 @@ class FWnucl(Attack):
         self.gr = (math.sqrt(5) + 1) / 2
 
 
-    def loss_fn(self, x, y, lossfn):
+    def __loss_fn(self, x, y, lossfn):
         '''
         Compute loss depending on self.targeted.
         '''
@@ -380,7 +346,7 @@ class FWnucl(Attack):
 
         Returns a tensor of the same shape as x containing adversarial examples
         '''
-        eps = self.eps
+        
         x = x.to(self.device)
         y = y.to(self.device)
         lossfn = nn.CrossEntropyLoss()
@@ -392,11 +358,11 @@ class FWnucl(Attack):
                 print(f'\rIteration {t+1}/{self.iters}', end='')
             self.model.zero_grad()
             out = self.model(x + noise)
-            loss = self.loss_fn(out, y, lossfn)
+            loss = self.__loss_fn(out, y, lossfn)
             loss.backward()
-            s = self.groupNuclearLMO(noise.grad.data, eps=eps)
+            s = self.__groupNuclearLMO(noise.grad.data, eps=self.eps)
             with torch.no_grad():
-                gamma = self.lineSearch(x, s, noise, y)
+                gamma = self.__lineSearch(x, s, noise, y)
                 noise = (1 - gamma) * noise + gamma * s
             noise.requires_grad = True
 
@@ -406,7 +372,7 @@ class FWnucl(Attack):
         return x.detach()
 
 
-    def lineSearch(self, x, s, noise, y, steps=20):
+    def __lineSearch(self, x, s, noise, y, steps=25):
         '''
         Perform line search for the step size.
         '''
@@ -418,8 +384,8 @@ class FWnucl(Attack):
         sx = s - noise
 
         for i in range(steps):
-            loss1 = self.loss_fn(self.model(x + noise + c * sx), y, lossfn)
-            loss2 = self.loss_fn(self.model(x + noise + d * sx), y, lossfn)
+            loss1 = self.__loss_fn(self.model(x + noise + c * sx), y, lossfn)
+            loss2 = self.__loss_fn(self.model(x + noise + d * sx), y, lossfn)
             mask = loss1 > loss2
 
             b[mask] = d[mask]
@@ -432,7 +398,7 @@ class FWnucl(Attack):
         return (b + a) / 2
 
 
-    def groupNuclearLMO(self, x, eps=5):
+    def __groupNuclearLMO(self, x, eps=5):
         '''
         LMO for the nuclear group norm ball.
         '''
@@ -486,8 +452,8 @@ class FWnucl(Attack):
 #################################### SAIF #####################################
 
 class SAIF(Attack):
-    def __init__(self, model, targeted, img_range = (0, 1), steps: = 200,
-                 r0 = 1, ver = False):
+    def __init__(self, model, *args, targeted=False, img_range=(-1, 1), steps=200,
+                 r0=1, ver=False, k=25, eps=1.0, **kwargs):
         '''
         Implementation of the sparse Frank-Wolfe attack SAIF
         https://arxiv.org/pdf/2212.07495.pdf
@@ -506,9 +472,11 @@ class SAIF(Attack):
         self.r0 = r0
         self.loss_fn = torch.nn.CrossEntropyLoss()
         self.ver = ver
+        self.k = k
+        self.eps = eps
 
 
-    def __call__(self, x, y, k = 25, eps = 1.0):
+    def __call__(self, x, y):
         '''
         Perform the  attack on a batch of images x.
 
@@ -531,9 +499,9 @@ class SAIF(Attack):
         out = self.model(x_)
         loss = -self.loss_fn(out, y)
         loss.backward()
-        p = -eps * x_.grad.sign()
+        p = -self.eps * x_.grad.sign()
         p = p.detach()
-        ksmallest = torch.topk(-x_.grad.view(B, -1), k, dim=1)[1]
+        ksmallest = torch.topk(-x_.grad.view(B, -1), self.k, dim=1)[1]
         ksmask = torch.zeros((B, C * H * W), device=self.device)
         ksmask[batchidx, ksmallest] = 1
         s = ksmask.view(B, C, H, W).detach().float()
@@ -546,17 +514,17 @@ class SAIF(Attack):
             p.requires_grad = True
             s.requires_grad = True
 
-            D = self.Dtadv(x, s, p, y)
+            D = self.__Dtadv(x, s, p, y)
             D.backward()
             mp = p.grad
             ms = s.grad
 
             with torch.no_grad():
                 # inf-norm LMO
-                v = - eps * mp.sign()
+                v = - self.eps * mp.sign()
 
                 # 1-norm LMO
-                ksmallest = torch.topk(-ms.view(B, -1), k, dim=1)[1]
+                ksmallest = torch.topk(-ms.view(B, -1), self.k, dim=1)[1]
                 ksmask = torch.zeros((B, C * H * W), device=self.device)
                 ksmask[batchidx, ksmallest] = 1
                 ksmask = ksmask.view(B, C, H, W)
@@ -564,7 +532,7 @@ class SAIF(Attack):
 
                 # update stepsize until primal progress is made
                 mu = 1 / (2 ** r * math.sqrt(t + 1))
-                while self.Dtadv(x, s + mu * (z - s), p + mu * (v - p), y) > D:
+                while self.__Dtadv(x, s + mu * (z - s), p + mu * (v - p), y) > D:
                     r += 1
                     mu = 1 / (2 ** r * math.sqrt(t + 1))
 
@@ -574,12 +542,12 @@ class SAIF(Attack):
                 x_adv = torch.clamp(x + p, *self.img_range)
                 p = x_adv - x
 
-        if self.ver
+        if self.ver:
             print('')
         return (x + s * p).detach()
 
 
-    def Dtadv(self, x, s, p, y):
+    def __Dtadv(self, x, s, p, y):
         out = self.model(x + s * p)
         if self.targeted:
             return self.loss_fn(out, y)
@@ -589,9 +557,9 @@ class SAIF(Attack):
 ################################## StrAttack ##################################
 
 class StrAttack(Attack):
-    def __init__(self, model, targeted=False, img_range=(0, 1), kappa=0,
+    def __init__(self, model, *args, targeted=False, img_range=(-1, 1), kappa=0,
                  max_iter=200, ver=False, search_steps=8, max_c=1e10, rho=1,
-                 c=2.5, retrain=True):
+                 c=2.5, retrain=True, **kwargs):
         '''
         Implementation of StrAttack: https://arxiv.org/abs/1808.01664
         Adapted from https://github.com/KaidiXu/StrAttack
@@ -619,10 +587,10 @@ class StrAttack(Attack):
         self.c = c
         self.retrain = retrain
 
-    def compare(self, x, y):
+    def __compare(self, x, y):
         return torch.equal(x, y) if self.targeted else not torch.equal(x, y)
 
-    def f(self, x, y):
+    def __f(self, x, y):
         '''
         CW loss function
         '''
@@ -696,7 +664,7 @@ class StrAttack(Attack):
                 y = torch.clamp((1 - tau / (self.rho * cNorm)), 0) * c
 
                 # second update step (8) / equation (15)
-                z_grads = self.get_z_grad(imgs, labs, z.clone(), cs)
+                z_grads = self.__get_z_grad(imgs, labs, z.clone(), cs)
                 eta = alpha * math.sqrt(iter_ + 1)
                 coeff = (1 / (eta + 3 * self.rho))
                 z = coeff * (eta * z + self.rho * (delta + w + y) + u + s + v - z_grads)
@@ -712,17 +680,17 @@ class StrAttack(Attack):
                 l2s = torch.sum((z ** 2).reshape(z.size(0), -1), dim=-1)
 
                 for i, (l2, sc, x_) in enumerate(zip(l2s, scores, x)):
-                    if l2 < bestl2[i] and self.compare(asc:=torch.argmax(sc), labs[i]):
+                    if l2 < bestl2[i] and self.__compare(asc:=torch.argmax(sc), labs[i]):
                         bestl2[i] = l2
                         bestscore[i] = asc
-                    if l2 < o_bestl2[i] and self.compare(asc:=torch.argmax(sc), labs[i]):
+                    if l2 < o_bestl2[i] and self.__compare(asc:=torch.argmax(sc), labs[i]):
                         o_bestl2[i] = l2
                         o_bestscore[i] = asc
                         o_bestattack[i] = x_.detach().clone()
                         o_besty[i] = y[i]
 
             for i in range(batch_size):
-                if (self.compare(bestscore[i], labs[i]) and bestscore[i] != -1 and bestl2[i] == o_bestl2[i]):
+                if (self.__compare(bestscore[i], labs[i]) and bestscore[i] != -1 and bestl2[i] == o_bestl2[i]):
                     upper_bound[i] = min(upper_bound[i], cs[i])
                     if upper_bound[i] < 1e9:
                         cs[i] = (lower_bound[i] + upper_bound[i]) / 2
@@ -771,7 +739,7 @@ class StrAttack(Attack):
                     x = imgs + deltA
                     scores = self.model(x)
                     l2s = torch.sum((z ** 2).reshape(z.size(0), -1), dim=-1)
-                    grad = self.get_z_grad(imgs, labs, deltA, cs)
+                    grad = self.__get_z_grad(imgs, labs, deltA, cs)
 
                     stepsize = 1 / (alpha + 2 * self.rho)
                     z1 = stepsize * (alpha * z1 * self.rho
@@ -779,10 +747,10 @@ class StrAttack(Attack):
                     u1 = u1 + deltA - z1
 
                     for i, (l2, sc, x_) in enumerate(zip(l2s, scores, x)):
-                        if (l2 < bestl2[i] and self.compare(asc:=torch.argmax(sc), labs[i])):
+                        if (l2 < bestl2[i] and self.__compare(asc:=torch.argmax(sc), labs[i])):
                             bestl2[i] = l2
                             bestscore[i] = asc
-                        if (l2 < o_bestl2[i] and self.compare(asc:=torch.argmax(sc), labs[i])):
+                        if (l2 < o_bestl2[i] and self.__compare(asc:=torch.argmax(sc), labs[i])):
                             o_bestl2[i] = l2
                             o_bestscore[i] = asc
                             o_bestattack[i] = x_.detach().clone()
@@ -790,7 +758,7 @@ class StrAttack(Attack):
 
 
                 for i in range(batch_size):
-                    if self.compare(bestscore[i], labs[i]) and bestscore[i] != -1 and bestl2[i] == o_bestl2[i]:
+                    if self.__compare(bestscore[i], labs[i]) and bestscore[i] != -1 and bestl2[i] == o_bestl2[i]:
                         upper_bound[i] = min(upper_bound[i], cs[i])
                         if upper_bound[i] < 1e9:
                             cs[i] = (lower_bound[i] + upper_bound[i]) / 2
@@ -806,12 +774,12 @@ class StrAttack(Attack):
         return o_bestattack
 
 
-    def get_z_grad(self, imgs, y, z, cs):
+    def __get_z_grad(self, imgs, y, z, cs):
         '''
         Compute and return gradient of loss wrt. z.
         '''
         z.requires_grad = True
-        tmp = self.f(z + imgs, y)
+        tmp = self.__f(z + imgs, y)
         loss = torch.mean(cs * tmp)
         loss.backward()
         z.detach_()
@@ -821,11 +789,11 @@ class StrAttack(Attack):
 ################################# Homotopy ####################################
 
 class HomotopyAttack(Attack):
-    def __init__(self, model, targeted=False, img_range=(-1, 1), ver=False,
+    def __init__(self, model, *args, targeted=False, img_range=(-1, 1), ver=False,
                  loss_type='cw', max_epsilon=0.1, dec_factor=0.98, val_c=1e-2,
                  val_w1=1e-1, val_w2=1e-3, max_update=1, maxiter=100,
                  val_gamma=0.8, eta=0.9, delta=0.3, rho=0.8, beta=1e-2,
-                 iter_init=50, kappa=0.0, iter_inc=[], n_segments=500):
+                 iter_init=50, kappa=0.0, iter_inc=[], n_segments=500, **kwargs):
         '''
         Implementation of group-wise sparse Homotopy attack:
         https://arxiv.org/abs/2106.06027
