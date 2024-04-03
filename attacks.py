@@ -621,7 +621,7 @@ class StrAttack(Attack):
 
         alpha, tau, gamma = 5, 2, 1
         eps = torch.full_like(imgs, 1.0)
-        # 16 for imagenet, 2 for CIFAR and MNIST
+        # 8 for imagenet, 2 for CIFAR and MNIST
         filterSize = 8 if sh[-1] > 32 else 2
         stride = filterSize
         # convolution kernel used to compute norm of each group
