@@ -53,7 +53,6 @@ def DFS(notdiscovered, intmask, i):
     Performs DFS on a perturbation by treating adjacent non-zero pixels as
     neighboring nodes of a graph.
     '''
-    #neighbors = [[-1, -1], [-1, 0], [-1, 1], [0, -1], [0, 1], [1, -1], [1, 0], [1, 1]]
     neighbors = [[-1, 0], [0, -1], [0, 1], [1, 0]]
     nonzeroidxs = torch.nonzero(notdiscovered, as_tuple=True)
     rnd = random.randint(0, len(nonzeroidxs[0])-1)
