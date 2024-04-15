@@ -33,6 +33,9 @@ def getBasicCNN():
                          nn.MaxPool2d(2),
                          nn.Flatten(),
                          nn.Linear(3200, 256),
+                         nn.ReLU(),
+                         nn.Linear(256, 256),
+                         nn.ReLU(),
                          nn.Linear(256, 10))
     
 
