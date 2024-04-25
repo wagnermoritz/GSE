@@ -1450,3 +1450,398 @@ class HomotopyAttack(Attack):
             return torch.sum(torch.max(other-real, kappa))
         else :
             return torch.sum(torch.max(real-other, kappa))
+
+class SAAPF(Attack):
+    def __init__(self,
+                 model,
+                 categories=10,
+                 device='cuda:0',  
+                 max_iters=10, 
+                 lambda_1_max_iters=6, 
+                 targeted=True, 
+                 ver=True, 
+                 img_range=(0, 1), 
+                 k=200,
+                 lambda_1=1e-3,
+                 lambda_2=1e-3,
+                 init_lambda_1 = 1e-3,
+                 lambda_1_LB=0,
+                 lambda_1_UB=100,
+                 loss='ce',
+                 ):
+        """
+        Implementation of Sparse Adversarial Attack via Perturbation Factorization 
+        https://www.ecva.net/papers/eccv_2020/papers_ECCV/papers/123670035.pdf
+        Adapted from https://github.com/wubaoyuan/Sparse-Adversarial-Attack/
+
+        Args:
+            model:                  Callable, Pytorch Classifier 
+            categories:             Int, number of image labels for the dataset. For CIFAR10, set to 10. For IMAGENET, set to 1000. Defaults to 10.
+            max_iters:              Int, maximum number of iterations to iter between G and epsilon. Defaults to 1.
+            lambda_1_max_iters:     Int, maximum number of iterations for binary search of lambda_1. Defaults to 6.
+            targeted:               Bool, given label is used as a target label if set to True. Defaults to False.
+            ver:                    Bool, print Progress if set to True. Defaults to True.
+            img_range:              Tuple, lower and upper bound of the image entries. Defaults to (0, 1).
+            k:                      Int, maximum number of noised pixels. Defaults to 200.
+            lambda_1:               Float. Defaults to 1e-3.
+            lambda_2 :              Float. Defaults to 1e-3.
+            init_lambda_1:          Float, initial value of lambda_1. Defaults to 1e-3.
+            lambda_1_LB:            Int, upper bound for lambda_1. Defaults to 0.
+            lambda_1_UB:            Int, lower bound for lambda_1. Defaults to 100.
+            loss:                   String, loss function to use, 'cw' for Carlini Wagner Loss and 'ce' for Cross Entropy Loss. Defaults to 'cw'.
+        """
+
+        super().__init__(model, targeted, img_range)
+
+        self.categories = categories
+        self.init_lambda1 = init_lambda_1
+        self.k = k
+        self.lambda1 = lambda_1
+        self.lambda2 = lambda_2
+        self.lambda1_search_times = lambda_1_max_iters
+        self.lambda_1_LB = lambda_1_LB
+        self.lambda_1_UB = lambda_1_UB
+        self.loss = loss
+        self.max_iters = max_iters
+        self.ver = ver
+
+    def __call__(self, x, y):
+        """
+        Call the attack for a batch of images x.
+
+        Args:
+            x: Tensor of shape [B, C, H, W], batch of images.
+            y: Tensor of shape [B], batch of labels.
+
+        Returns:
+            Returns a tensor of the same shape as x containing adversarial examples
+        """
+        return (x + self.saapf(x,y)).detach()
+
+    def saapf(self, x, y):
+        """
+        Perfroms the attack on the batch of images
+        Args:
+            x: Tensor of shape [B, C, H, W], batch of images.
+            y: Tensor of shape [B], batch of labels.
+
+        Returns:
+            Returns a tensor of the same shape as x of element-wise multiplication of epsilon and G 
+        """
+        torch.backends.cudnn.deterministic=True
+        for param in self.model.parameters():
+            param.requires_grad = False
+        self.model.eval()
+
+        x_clone = x.clone()
+        B_array = []
+        
+        for image in range(x.shape[0]):
+
+            permuted_img = x_clone[image].permute(1,2,0)
+            image_4_mask = np.array(permuted_img.cpu(), dtype=np.uint8)  
+            segments = skimage.segmentation.slic(image_4_mask, n_segments=150, compactness=10)
+
+            block_num = max(segments.flatten())+1 - min(segments.flatten())     
+            B = np.zeros((block_num, x.shape[1], x.shape[3], x.shape[2]))
+            
+            for index in range(min(segments.flatten()),max(segments.flatten())+1):
+                mask = (segments == index)
+                B[index-1,:,mask] = 1
+
+            B = torch.from_numpy(B).float().to(self.device)     
+            B_array.append(B)   
+
+        noise_Weight = self.compute_sensitive(x, weight_type='gradient')
+        G, epsilon = self.train_adptive(x, y, B_array, noise_Weight)
+        return epsilon * G
+
+    def train_adptive(self, x, target, B, noise_Weight):
+        """
+        Peforms Binary search of lambda_1.
+        """
+        self.lambda1 = self.init_lambda1
+        lambda1_upper_bound = self.lambda_1_UB
+        lambda1_lower_bound = self.lambda_1_LB
+        
+        for search_time in range(1, self.lambda1_search_times+1):
+
+            if self.ver:
+                print(f"Binary step {search_time}/{self.lambda1_search_times}")
+            results = self.train_sgd_atom(x, target, B, noise_Weight)
+            
+                
+            if search_time < self.lambda1_search_times:
+                if results['status'] == True:
+                    if self.lambda1 < 0.01*self.init_lambda1:  
+                        break
+                    # success, divide lambda1 by two
+                    lambda1_upper_bound = min(lambda1_upper_bound,self.lambda1)
+                    if lambda1_upper_bound < self.lambda_1_UB:
+                        self.lambda1 = (lambda1_upper_bound+ lambda1_lower_bound)/2
+                else:
+                    # failure, either multiply by 10 if no solution found yet
+                    # or do binary search with the known upper bound
+                    lambda1_lower_bound = max(lambda1_lower_bound, self.lambda1)
+                    if lambda1_upper_bound < self.lambda_1_UB:
+                        self.lambda1 = (lambda1_upper_bound+ lambda1_lower_bound)/2
+                    else:
+                        self.lambda1 *= 10     
+
+        return results['G'], results['epsilon'] 
+
+    def train_sgd_atom(self, x, target_label, B, noise_Weight):
+        """
+        Performs iterative optimization of epsilon and G.
+        """
+        target_label_tensor=target_label.clone()
+
+        G = torch.ones_like(x, dtype=torch.float32, device=self.device)
+        epsilon = torch.zeros_like(x, dtype=torch.float32, device=self.device)
+
+        rho1 = 5e-3
+        rho2 = 5e-3
+        rho3 = 5e-3
+        rho4 = 1e-4
+        
+        cur_lr_e = 0.1
+        cur_lr_g = {'cur_step_g': 0.1, 'cur_rho1': rho1, 'cur_rho2': rho2, 'cur_rho3': rho3,'cur_rho4': rho4}
+        
+        for mm in range(1,self.max_iters + 1):  
+            epsilon, cur_lr_e = self.update_epsilon(x, target_label_tensor, epsilon, G, cur_lr_e, B, noise_Weight, mm, False)
+            G, cur_lr_g = self.update_G(x, target_label_tensor, epsilon, G, cur_lr_g, B, noise_Weight, mm)
+
+            if self.ver:
+                print(f"{mm}/{self.max_iters}")
+
+        G = (G > 0.5).float()
+        # recording results per iteration
+        if self.targeted:
+            num_correct = (torch.argmax(self.model(x + epsilon * G),dim=1) == target_label)
+        else:
+            num_correct = (torch.argmax(self.model(x + epsilon * G), dim=1) != target_label)
+        num_correct = num_correct.float().mean()
+
+        if num_correct > 0.5:
+            results_status=True
+        else:
+            results_status=False
+        
+        results = {
+            'status': results_status,
+            'G' : G.detach(),
+            'epsilon' : epsilon.detach(),
+        }
+        return results
+
+    def update_epsilon(self, x, target_label, epsilon, G, init_lr, B, noise_Weight, out_iter, finetune):
+        """
+        Method for updating epsilon.
+        """
+        cur_step = init_lr
+        train_epochs = int(2000/2.0) if finetune else 2000
+    
+        for cur_iter in range(1,train_epochs+1): 
+            epsilon.requires_grad = True  
+            G.requires_grad = False
+            
+            images_s = x + torch.mul(epsilon, G) 
+            images_s = torch.clamp(images_s,self.img_range[0], self.img_range[1])
+            prediction = self.model(images_s)
+            
+            #loss
+            if self.loss == 'ce':
+                ce = nn.CrossEntropyLoss()
+                if self.targeted:
+                    loss = ce(prediction, target_label)
+                else:
+                    loss = -ce(prediction, target_label)
+            elif self.loss == 'cw':    
+                one_hot_y = F.one_hot(target_label, prediction.size(1))
+                Z_t = torch.sum(prediction * one_hot_y, dim=1)
+                Z_i = torch.amax(prediction * (1 - one_hot_y) - (one_hot_y * 1e5), dim=1)
+                if self.targeted:
+                    loss = F.relu(Z_i - Z_t + 0).mean()
+                else:
+                    loss =  F.relu(Z_t - Z_i + 0).mean()
+
+            if epsilon.grad is not None:  #the first time there is no grad
+                epsilon.grad.data.zero_()
+            
+            loss.backward(retain_graph=True)
+            epsilon_cnn_grad = epsilon.grad
+            epsilon_grad = 2*epsilon*G*G*noise_Weight*noise_Weight + self.lambda1 * epsilon_cnn_grad
+            epsilon = epsilon - cur_step * epsilon_grad
+            epsilon = epsilon.detach()  
+            
+            
+            # updating learning rate
+            if cur_iter % 50 == 0:
+                cur_step = max(cur_step*0.9, 0.001) 
+
+        return epsilon, cur_step
+    
+    def update_G(self, x, target_label, epsilon, G, init_params, B, noise_Weight, out_iter):
+        """
+        Method for updating G.
+        """
+        cur_step = init_params['cur_step_g']
+        cur_rho1 = init_params['cur_rho1']
+        cur_rho2 = init_params['cur_rho2']
+        cur_rho3 = init_params['cur_rho3']
+        cur_rho4 = init_params['cur_rho4']
+
+        # initialize y1, y2 as all 1 matrix, and z1, z2, z4 as all zeros matrix
+        y1 = torch.ones_like(G)
+        y2 = torch.ones_like(G)
+        y3 = torch.ones_like(G)
+        z1 = torch.zeros_like(G)
+        z2 = torch.zeros_like(G)
+        z3 = torch.zeros_like(G)
+        z4 = torch.zeros(1, device=self.device)
+        ones = torch.ones_like(G)
+
+        for cur_iter in range(1,2000+1): 
+            G.requires_grad = True
+            epsilon.requires_grad = False
+            
+            # 1.update y1 & y2
+            y1 = torch.clamp((G.detach() + z1/cur_rho1), 0.0, 1.0)
+            y2 = self.project_shifted_lp_ball(G.detach() + z2/cur_rho2, 0.5*torch.ones_like(G))      
+            
+            # 2.update y3
+            C=G.detach()+z3/cur_rho3
+            for image_index in range(len(B)):   
+                BC = C[image_index]*B[image_index]                                       
+                n,c,w,h = BC.shape
+                Norm = torch.norm(BC.reshape(n, c*w*h), p=2, dim=1).reshape((n,1,1,1))   
+                coefficient = 1-self.lambda2/(cur_rho3*Norm)    
+                coefficient = torch.clamp(coefficient, min=0)   
+                BC = coefficient*BC                           
+                y3[image_index] = torch.sum(BC, dim=0)  
+            
+            # 3.update G
+            #cnn_grad_G
+            image_s = x + torch.mul(G, epsilon)
+            image_s = torch.clamp(image_s, self.img_range[0], self.img_range[1])
+            prediction = self.model(image_s)
+            
+            if self.loss == 'ce':
+                ce = nn.CrossEntropyLoss()
+                
+                if self.targeted:
+                    loss = ce(prediction, target_label)   
+                else:
+                    loss = -ce(prediction, target_label)
+            elif self.loss == 'cw':
+                one_hot_y = F.one_hot(target_label, prediction.size(1))
+                Z_t = torch.sum(prediction * one_hot_y, dim=1)
+                Z_i = torch.amax(prediction * (1 - one_hot_y) - (one_hot_y * 1e5), dim=1)
+                if self.targeted:
+                    loss = F.relu(Z_i - Z_t + 0).mean()
+                else:
+                    loss =  F.relu(Z_t - Z_i + 0).mean()
+            
+            if G.grad is not None:  #the first time there is no grad
+                G.grad.data.zero_()
+            loss.backward()
+            cnn_grad_G = G.grad
+            
+            grad_G = 2*G*epsilon*epsilon*noise_Weight*noise_Weight + self.lambda1*cnn_grad_G \
+                    + z1 + z2 + z3+ z4.unsqueeze(1).unsqueeze(2).unsqueeze(3)*ones + cur_rho1*(G-y1) \
+                    + cur_rho2*(G-y2)+ cur_rho3*(G-y3) \
+                    + cur_rho4*(torch.sum(G,dim=(1,2,3)).unsqueeze(1).unsqueeze(2).unsqueeze(3) - self.k)*ones
+            G = G - cur_step*grad_G
+            G = G.detach()
+            
+            # 4.update z1,z2,z3,z4
+            z1 = z1 + cur_rho1 * (G.detach() - y1)
+            z2 = z2 + cur_rho2 * (G.detach() - y2)
+            z3 = z3 + cur_rho3 * (G.detach() - y3)
+            z4 = z4 + cur_rho4 * (torch.sum(G,dim=(1,2,3))-self.k)
+
+            # 5.updating rho1, rho2, rho3, rho4
+            if cur_iter % 1 == 0:
+                cur_rho1 = min(1.01 * cur_rho1, 20)
+                cur_rho2 = min(1.01 * cur_rho2, 20)
+                cur_rho3 = min(1.01 * cur_rho3, 100)
+                cur_rho4 = min(1.01 * cur_rho4, 0.01)
+                
+            # updating learning rate
+            if cur_iter % 50 == 0:
+                cur_step = max(cur_step*0.9, 0.001)
+
+            cur_iter = cur_iter + 1
+
+        res_param = {'cur_step_g': cur_step, 'cur_rho1': cur_rho1,'cur_rho2': cur_rho2, 'cur_rho3': cur_rho3,'cur_rho4': cur_rho4}
+        return G, res_param
+
+    
+    def project_shifted_lp_ball(self, x, shift_vec):
+        """
+        Performs projection onto the box constraint S_b.
+        """
+        shift_x = x - shift_vec
+
+        # compute L2 norm: sum(abs(v)^2)^(1/2)
+        norm2_shift = torch.norm(shift_x, 2, dim=(1,2,3))
+
+        n = float(x.numel())
+        xp = (n**(1/2))/2 * (shift_x / norm2_shift.unsqueeze(1).unsqueeze(2).unsqueeze(3)) + shift_vec
+        return xp
+
+    def compute_sensitive(self, x, weight_type='none'):
+        """
+        Computes sensitive.
+        """
+        weight = torch.ones_like(x) 
+        n, c, h, w = x.shape   #1,3,299,299
+        
+        if weight_type == 'none':
+            return weight
+            
+        else:
+            if weight_type == 'gradient':
+                from scipy.ndimage import filters
+
+                weight = torch.zeros_like(x)
+                for image_index in range(x.shape[0]):
+                    im = x[image_index].permute(1,2,0)                            #229,229,3
+                    im_Prewitt_x = torch.zeros(im.shape ,dtype=torch.float32, device=self.device)
+                    im_Prewitt_y = torch.zeros(im.shape ,dtype=torch.float32, device=self.device)
+                    im_Prewitt_xy = torch.zeros(im.shape ,dtype=torch.float32, device=self.device)
+            
+                    filters.prewitt(im.cpu().numpy(), 1, im_Prewitt_x.cpu().numpy())
+                    filters.prewitt(im.cpu().numpy(), 0, im_Prewitt_y.cpu().numpy())
+                    im_Prewitt_xy = torch.sqrt(im_Prewitt_x ** 2 + im_Prewitt_y ** 2) 
+                    
+                    im_Prewitt_xy = im_Prewitt_xy.permute(2,0,1)
+                    weight[image_index] = im_Prewitt_xy.clone().float()
+        
+            else:
+                for i in range(h):
+                    for j in range(w):
+                        left = max(j - 1, 0)
+                        right = min(j + 2, w)
+                        up = max(i - 1, 0)
+                        down = min(i + 2, h)
+                        
+                        for k in range(c):
+                            if weight_type == 'variance':
+                                weight[0, k, i, j] = torch.std(x[0, k, up:down, left:right])
+                            elif weight_type == 'variance_mean':
+                                weight[0, k, i, j] = torch.std(x[0, k, up:down, left:right]) * torch.mean(x[0, k, up:down, left:right])
+                            elif weight_type == 'contrast':
+                                weight[0, k, i, j] = (torch.max(x[0, k, up:down, left:right]) - torch.min(x[0, k, up:down, left:right])) / (torch.max(x[0, k, up:down, left:right]) + torch.min(x[0, k, up:down, left:right]))
+                            elif weight_type == 'contrast_mean':
+                                contrast = (torch.max(x[0, k, up:down, left:right]) - torch.min(x[0, k, up:down, left:right])) / (torch.max(x[0, k, up:down, left:right]) + torch.min(x[0, k, up:down, left:right]))
+                                weight[0, k, i, j] = contrast * torch.mean(x[0, k, up:down, left:right])
+                                
+                            if torch.isnan(weight[0, k, i, j]):
+                                weight[0, k, i, j] = 1e-4
+                                
+            weight = 1.0 / (weight + 1e-4) 
+            for k in range(c):
+                weight[:, k, :, :] = (weight[:, k, :, :] - torch.min(weight[:, k, :, :])) / (torch.max(weight[:, k, :, :]) - torch.min(weight[:, k, :, :]))
+            
+            return weight
