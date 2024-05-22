@@ -3,6 +3,9 @@ import os
 
 def process_dir_targeted(res, path="./Outputs/"):
     files = [f.name for f in os.scandir(path + res) if f.name.endswith(".txt")]
+    if len([f for f in files if not 'no_adversarial_example_found' in f]) == 0:
+        print('No adversarial examples found for test ' + res)
+        return
     os.makedirs("./Results/" + res + "/", exist_ok=True)
 
     # IS
@@ -36,6 +39,9 @@ def process_dir_targeted(res, path="./Outputs/"):
 
 def process_dir_untargeted(res, path="./Outputs/"):
     files = [f.name for f in os.scandir(path + res) if f.name.endswith(".txt")]
+    if len([f for f in files if not 'no_adversarial_example_found' in f]) == 0:
+        print('No adversarial examples found for test ' + res)
+        return
     os.makedirs("./Results/" + res + "/", exist_ok=True)
 
     # averge
@@ -62,3 +68,4 @@ if __name__  == "__main__":
             process_dir_untargeted(res)
         else:
             process_dir_targeted(res)
+

@@ -1,58 +1,57 @@
 {
-    "GSE":{
-        "targeted":{
-            "ImageNet":{
+    "GSE": {
+        "targeted": {
+            "ImageNet": {
                 "mu": 0.1,
-                "beta": 0.025,
-                "k_hat": 2,
-                "q": 0.95
+                "sigma": 0.05,
+                "k_hat": 50,
+                "q": 0.9
             },
-            "CIFAR10":{
+            "CIFAR10": {
                 "mu": 1.0,
-                "beta": 0.025,
-                "k_hat": 2,
-                "q": 0.1
+                "sigma": 0.005,
+                "k_hat": 50,
+                "q": 0.25
             }
         },
-        "untargeted":{
-            "ImageNet":{
+        "untargeted": {
+            "ImageNet": {
                 "mu": 0.1,
-                "beta": 0.025,
-                "k_hat": 2,
-                "q": 0.95
+                "sigma": 0.05,
+                "k_hat": 50,
+                "q": 0.9
             },
-            "CIFAR10":{
+            "CIFAR10": {
                 "mu": 1.0,
-                "beta": 0.025,
-                "k_hat": 2,
-                "q": 0.1
+                "sigma": 0.005,
+                "k_hat": 30,
+                "q": 0.25
             }
         }
     },
-
-    "StrAttack":{
-        "targeted":{
-            "ImageNet":{
+    "StrAttack": {
+        "targeted": {
+            "ImageNet": {
                 "c": 2.5,
                 "search_steps": 8,
                 "max_c": 1e10,
                 "rho": 1
             },
-            "CIFAR10":{
+            "CIFAR10": {
                 "c": 0.25,
                 "search_steps": 8,
                 "max_c": 1e10,
                 "rho": 1
             }
         },
-        "untargeted":{
-            "ImageNet":{
+        "untargeted": {
+            "ImageNet": {
                 "c": 2.5,
                 "search_steps": 8,
                 "max_c": 1e10,
                 "rho": 1
             },
-            "CIFAR10":{
+            "CIFAR10": {
                 "c": 0.25,
                 "search_steps": 8,
                 "max_c": 1e10,
@@ -60,10 +59,9 @@
             }
         }
     },
-
-    "Homotopy":{
-        "targeted":{
-            "ImageNet":{
+    "Homotopy": {
+        "targeted": {
+            "ImageNet": {
                 "dec_factor": 0.98,
                 "val_c": 1e-2,
                 "val_w1": 1e-1,
@@ -71,10 +69,23 @@
                 "val_gamma": 0.8,
                 "beta": 1e-2,
                 "iter_init": 50,
-                "iter_inc": [500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 5500, 6000],
+                "iter_inc": [
+                    500,
+                    1000,
+                    1500,
+                    2000,
+                    2500,
+                    3000,
+                    3500,
+                    4000,
+                    4500,
+                    5000,
+                    5500,
+                    6000
+                ],
                 "n_segments": 500
             },
-            "CIFAR10":{
+            "CIFAR10": {
                 "dec_factor": 0.9,
                 "val_c": 1e-1,
                 "val_w1": 1e-3,
@@ -82,12 +93,18 @@
                 "val_gamma": 0.96,
                 "beta": 1e-1,
                 "iter_init": 50,
-                "iter_inc": [100, 200, 300, 400, 500],
+                "iter_inc": [
+                    100,
+                    200,
+                    300,
+                    400,
+                    500
+                ],
                 "n_segments": 100
             }
         },
-        "untargeted":{
-            "ImageNet":{
+        "untargeted": {
+            "ImageNet": {
                 "dec_factor": 0.98,
                 "val_c": 1e-2,
                 "val_w1": 1e-1,
@@ -95,10 +112,23 @@
                 "val_gamma": 0.8,
                 "beta": 1e-2,
                 "iter_init": 50,
-                "iter_inc": [500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 5500, 6000],
+                "iter_inc": [
+                    500,
+                    1000,
+                    1500,
+                    2000,
+                    2500,
+                    3000,
+                    3500,
+                    4000,
+                    4500,
+                    5000,
+                    5500,
+                    6000
+                ],
                 "n_segments": 500
             },
-            "CIFAR10":{
+            "CIFAR10": {
                 "dec_factor": 0.9,
                 "val_c": 1e-1,
                 "val_w1": 1e-3,
@@ -106,56 +136,127 @@
                 "val_gamma": 0.96,
                 "beta": 1e-1,
                 "iter_init": 50,
-                "iter_inc": [100, 200, 300, 400, 500],
+                "iter_inc": [
+                    100,
+                    200,
+                    300,
+                    400,
+                    500
+                ],
                 "n_segments": 100
             }
         }
     },
-
-    "FWnucl":{
-        "targeted":{
-            "ImageNet":{
+    "FWnucl": {
+        "targeted": {
+            "ImageNet": {
                 "eps": 5
             },
-            "CIFAR10":{
+            "CIFAR10": {
                 "eps": 5
             }
         },
-        "untargeted":{
-            "ImageNet":{
+        "untargeted": {
+            "ImageNet": {
                 "eps": 5
             },
-            "CIFAR10":{
+            "CIFAR10": {
                 "eps": 5
             }
         }
     },
-
-    "SAIF":{
-        "targeted":{
-            "ImageNet":{
-                "r0": 1,
-                "k": 500,
-                "eps": 1.0
+    "SAPF": {
+        "targeted": {
+            "ImageNet": {
+                "search_steps": 10,
+                "k": 19000,
+                "nsegs": 350,
+                "lam1": 0.01,
+                "lam2": 10
             },
-            "CIFAR10":{
-                "r0": 1,
-                "k": 50,
-                "eps": 1.0
+            "CIFAR10": {
+                "search_steps": 10,
+                "k": 265,
+                "nsegs": 150,
+                "lam1": 0.001,
+                "lam2": 10
             }
         },
-        "untargeted":{
-            "ImageNet":{
-                "r0": 1,
-                "k": 50,
-                "eps": 1.0
+        "untargeted": {
+            "ImageNet": {
+                "search_steps": 10,
+                "k": 19000,
+                "nsegs": 350,
+                "lam1": 0.01,
+                "lam2": 10
             },
-            "CIFAR10":{
-                "r0": 1,
-                "k": 25,
-                "eps": 1.0
+            "CIFAR10": {
+                "search_steps": 10,
+                "k": 265,
+                "nsegs": 150,
+                "lam1": 0.001,
+                "lam2": 10
+            }
+        }
+    },
+    "PGD0": {
+        "targeted": {
+            "ImageNet": {
+                "n_restarts": 5,
+                "k": 6600,
+                "iters": 200,
+                "stepsize": 470.6
+            },
+            "CIFAR10": {
+                "n_restarts": 5,
+                "k": 90,
+                "iters": 200,
+                "stepsize": 470.6
+            }
+        },
+        "untargeted": {
+            "ImageNet": {
+                "n_restarts": 5,
+                "k": 6600,
+                "iters": 200,
+                "stepsize": 470.6
+            },
+            "CIFAR10": {
+                "n_restarts": 5,
+                "k": 90,
+                "iters": 200,
+                "stepsize": 470.6
+            }
+        }
+    },
+    "SparseRS": {
+        "targeted": {
+            "ImageNet": {
+                "n_restarts": 10,
+                "n_queries": 10000,
+                "k": 6600,
+                "alpha_init": 0.8
+            },
+            "CIFAR10": {
+                "n_restarts": 10,
+                "n_queries": 10000,
+                "k": 90,
+                "alpha_init": 0.8
+            }
+        },
+        "untargeted": {
+            "ImageNet": {
+                "n_restarts": 10,
+                "n_queries": 10000,
+                "k": 6600,
+                "alpha_init": 0.8
+            },
+            "CIFAR10": {
+                "n_restarts": 10,
+                "n_queries": 10000,
+                "k": 90,
+                "alpha_init": 0.8
             }
         }
     }
-
 }

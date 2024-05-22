@@ -28,6 +28,8 @@ class CustomDataSet(Dataset):
         return len(self.total_imgs)
 
     def __getitem__(self, idx):
+        if torch.is_tensor(idx):
+            idx = idx.item()
         img_loc = os.path.join(self.main_dir, self.labels['ImageId'][idx]) + '.png'
         image = Image.open(img_loc).convert("RGB")
         tensor_image = self.transform(image)
@@ -53,6 +55,7 @@ def DFS(notdiscovered, intmask, i):
     Performs DFS on a perturbation by treating adjacent non-zero pixels as
     neighboring nodes of a graph.
     '''
+    #neighbors = [[-1, -1], [-1, 0], [-1, 1], [0, -1], [0, 1], [1, -1], [1, 0], [1, 1]]
     neighbors = [[-1, 0], [0, -1], [0, 1], [1, 0]]
     nonzeroidxs = torch.nonzero(notdiscovered, as_tuple=True)
     rnd = random.randint(0, len(nonzeroidxs[0])-1)
@@ -246,8 +249,9 @@ def test_targeted(attack, dataloader, labeloffsets, numclasses, num_batches=None
             l20s.append(d_2_0(x_adv - x).cpu())
             clusters.append(torch.tensor([countClusters((x_adv.cpu() - x.cpu())[idx].abs().mean(0)!=0).max().int().item() for idx in range(len(x))]))
 
-            for j, P in enumerate(percentiles):
-                IS_scores[j].append(IS(attack.model, x.detach(), y.detach(), (x_adv - x).detach(), P, (y+offs)%numclasses, device))
+            if mask.any():
+                for j, P in enumerate(percentiles):
+                    IS_scores[j].append(IS(attack.model, x.detach(), y.detach(), (x_adv - x).detach(), P, (y+offs)%numclasses, device))
 
         # best, average, and worst case for attack success
         Tsucc = torch.stack(successes, dim=0)
@@ -282,6 +286,9 @@ def test_targeted(attack, dataloader, labeloffsets, numclasses, num_batches=None
         l2_baw = getCases(l2s, l2_baw)
         l20_baw = getCases(l20s, l20_baw)
         clusters_baw = getCases(clusters, clusters_baw)
+    
+    if len(IS_scores[0]) == 0:
+        return False
 
     IS_scores = [torch.cat(score) for score in IS_scores]
 
@@ -344,6 +351,9 @@ def test_untargeted(attack, dataloader, num_batches=None):
         l20s.append(d_2_0(x_adv - x).cpu())
         clusters.append(torch.tensor([countClusters((x_adv.cpu() - x.cpu())[idx].abs().mean(0)!=0).max().int().item() for idx in range(len(x))]))
 
+    if len(l0s) == 0:
+        return False
+
     return l0s, clusters, successes, total_time, l2s, l20s, n
 
 
@@ -351,9 +361,15 @@ def save_images(x_adv, x_cam, images, dir_str):
     '''
     Saves images to the path dir_str.
     '''
-    x_adv = x_adv.cpu()
     images = images.cpu()
     x_cam = x_cam.cpu()
+    x_pert_red = x_adv.clone()
+    mask = (x_adv.squeeze() - images).mean(1, keepdim=True) != 0
+    red = torch.stack([torch.ones_like(mask, dtype=torch.float),
+                       -torch.ones_like(mask, dtype=torch.float),
+                       -torch.ones_like(mask, dtype=torch.float)], dim=1).float().view(*x_adv.shape)
+    x_pert_red[mask.repeat(1, x_adv.size(1), 1, 1)] = red[mask.repeat(1, x_adv.size(1), 1, 1)]
+
     os.makedirs(dir_str, exist_ok=True)
 
     for i in range(len(images)):
@@ -368,7 +384,7 @@ def save_images(x_adv, x_cam, images, dir_str):
         plt.savefig(dir_str + f'{i+1}_pert.png', transparent = True, bbox_inches = 'tight', pad_inches = 0)
 
         fig = plt.figure(figsize=(6,6), dpi=200)
-        plt.imshow(((x_adv[i].squeeze() - images[i]).mean(0, keepdim=True).permute(1,2,0) != 0).float(), cmap='gray')
+        plt.imshow(mask[i].permute(1,2,0).float(), cmap='gray')
         plt.axis('off')
         plt.savefig(dir_str + f'{i+1}_pertmask.png', transparent = True, bbox_inches = 'tight', pad_inches = 0)
 
@@ -381,6 +397,11 @@ def save_images(x_adv, x_cam, images, dir_str):
         plt.imshow(x_cam[i].squeeze() * 10 + 0.5, cmap='jet_r')
         plt.axis('off')
         plt.savefig(dir_str + f'{i+1}_CAM.png', transparent = True, bbox_inches = 'tight', pad_inches = 0)
+
+        fig = plt.figure(figsize=(6,6), dpi=200)
+        plt.imshow(x_pert_red[i].squeeze().permute(1,2,0) * 0.5 + 0.5)
+        plt.axis('off')
+        plt.savefig(dir_str + f'{i+1}_pert_red.png', transparent = True, bbox_inches = 'tight', pad_inches = 0)
 
 
 def write_untargeted_results(results, filename):

@@ -34,7 +34,7 @@ class Attack(object):
 class GSEAttack(Attack):
     def __init__(self, model, *args, ver=False, img_range=(-1, 1), search_steps=10,
                  targeted=False, sequential=False, search_factor=2,
-                 gb_size=5, sgm=1.5, mu=1, beta=0.0025, iters=200, k_hat=10,
+                 gb_size=5, sgm=1.5, mu=1, sigma=0.0025, iters=200, k_hat=10,
                  q=0.25, **kwargs):
         '''
         Implementation of the GSE attack.
@@ -56,7 +56,7 @@ class GSEAttack(Attack):
         gb_size:       Odd int, size of the Gaussian blur kernel.
         sgm:           Float, sigma of the gaussian blur kernel
         mu:            Float, trade-off parameter for 2-norm regularization.
-        beta:          Float, step size (sigma in paper)
+        sigma:         Float, step size
         iters:         Int, number of iterations.
         k_hat:         Int, number of iterations before transitioning to NAG.
         q:             Float, inverse of increase factor for adjust_lambda.
@@ -69,13 +69,13 @@ class GSEAttack(Attack):
         self.gb_size = gb_size
         self.sgm = sgm
         self.mu = mu
-        self.beta = beta
+        self.sigma = sigma
         self.iters = iters
         self.k_hat = k_hat
         self.q = q
 
 
-    def __adjust_lambda(self, lam, noise):
+    def adjust_lambda(self, lam, noise):
         '''
         Adjust trade-off parameters (lambda) to update search space.
         '''
@@ -88,13 +88,13 @@ class GSEAttack(Attack):
         return lam
 
 
-    def __section_search(self, x, y, steps=50):
+    def section_search(self, x, y, steps=50):
         '''
         Section search for finding the maximal lambda such that the
         perturbation is non-zero after the first iteration.
         '''
         noise = torch.zeros_like(x, requires_grad=True)
-        loss = (self.__f(x + noise, y).sum() + self.mu
+        loss = (self.f(x + noise, y).sum() + self.mu
                 * torch.norm(noise, p=2, dim=(1,2,3)).sum())
         loss.backward()
         grad = noise.grad
@@ -105,29 +105,29 @@ class GSEAttack(Attack):
         lb = torch.zeros((y.size(0),), dtype=torch.float,
                          device=self.device).view(-1, 1, 1)
         ub = lb.clone() + 0.001
-        mask = torch.norm(self.__prox(grad.clone() * self.beta,
-                                      ones * ub * self.beta),
+        mask = torch.norm(self.prox(grad.clone() * self.sigma,
+                                      ones * ub * self.sigma),
                           p=0, dim=(1,2,3)) != 0
         while mask.any():
             ub[mask] *= 2
-            mask = torch.norm(self.__prox(grad.clone() * self.beta,
-                                          ones * ub * self.beta),
+            mask = torch.norm(self.prox(grad.clone() * self.sigma,
+                                          ones * ub * self.sigma),
                               p=0, dim=(1,2,3)) != 0
 
         # perform search
         for _ in range(steps):
             cur = (ub + lb) / 2
-            mask = torch.norm(self.__prox(grad.clone() * self.beta,
-                                          ones * cur * self.beta),
+            mask = torch.norm(self.prox(grad.clone() * self.sigma,
+                                          ones * cur * self.sigma),
                               p=0, dim=(1,2,3)) == 0
             ub[mask] = cur[mask]
             mask = torch.logical_not(mask)
             lb[mask] = cur[mask]
+        cur = (lb + ub).view(-1) / 2
+        return 0.01 * cur
 
-        return (lb + ub).view(-1) / 2
 
-
-    def __call__(self, x, y):
+    def __call__(self, x, y, *args, **kwargs):
         '''
         Call the attack for a batch of images x or sequentially for all images
         in x depending on self.sequential.
@@ -141,24 +141,24 @@ class GSEAttack(Attack):
         if self.sequential:
             result = x.clone()
             for i, (x_, y_) in enumerate(zip(x, y)):
-                result[i] = self.__perform_att(x_.unsqueeze(0),
+                result[i] = self.perform_att(x_.unsqueeze(0),
                                              y_.unsqueeze(0),
-                                             mu=self.mu, beta=self.beta,
+                                             mu=self.mu, sigma=self.sigma,
                                              k_hat=self.k_hat).detach()
             return result
         else:
-            return self.__perform_att(x, y, mu=self.mu, beta=self.beta,
+            return self.perform_att(x, y, mu=self.mu, sigma=self.sigma,
                                     k_hat=self.k_hat)
 
 
-    def __perform_att(self, x, y, mu, beta, k_hat):
+    def perform_att(self, x, y, mu, sigma, k_hat):
         '''
-        Perform GSI attack on a batch of images x with corresponding labels y.
+        Perform GSE attack on a batch of images x with corresponding labels y.
         '''
         x = x.to(self.device)
         y = y.to(self.device)
         B, C, _, _ = x.shape
-        lams = self.__section_search(x, y)
+        lams = self.section_search(x, y)
         # save x, y, and lams for resetting them at the beginning of every
         # section search step
         save_x = x.clone()
@@ -183,10 +183,8 @@ class GSEAttack(Attack):
             active = torch.ones(B, dtype=bool, device=self.device)
             # set initial perturbation to zero
             noise = torch.zeros_like(x, requires_grad = True)
-            # epsilon for numerical stability of AdaGrad update
-            eps = torch.full_like(x, 1e-9)
-            # tensor for accumulating squared gradients for AdaGrad
-            G = torch.zeros_like(noise)
+            noise_old = noise.clone()
+            lr = 1
 
             # attack
             for j in range(self.iters):
@@ -198,40 +196,49 @@ class GSEAttack(Attack):
                     break
 
                 self.model.zero_grad()
-                loss = (self.__f(x + noise, y).sum() + mu
+                loss = (self.f(x + noise, y).sum() + mu
                         * (torch.norm(noise, p=2, dim=(1,2,3)) ** 2).sum())
                 loss.backward()
 
                 with torch.no_grad():
-                    # update search space
-                    if j % k_hat == 0 or j < 10:
-                        noise_ = noise - noise.grad.data
-                        noise_ = self.__prox(noise_, lam)
-                        lam = self.__adjust_lambda(lam, noise_)
+                    lr_ = (1 + math.sqrt(1 + 4 * lr**2)) / 2
+                    if j == k_hat:
                         lammask = (lam > lams.view(-1, 1, 1))[:, None, :, :]
                         lammask = lammask.repeat(1, C, 1, 1)
-
-                    # AdaGrad update
-                    G += noise.grad.data ** 2
-                    noise = noise - (beta / torch.sqrt(G + eps)) * noise.grad.data
-                    noise[lammask] = 0
+                        noise_old = noise.clone()
+                    if j < k_hat:
+                        noise = noise - sigma * noise.grad.data
+                        noise = self.prox(noise, lam * sigma)
+                        noise_tmp = noise.clone()
+                        noise = lr / lr_ * noise + (1 - (lr/ lr_)) * noise_old
+                        noise_old = noise_tmp.clone()
+                        lam = self.adjust_lambda(lam, noise)
+                    else:
+                        noise = noise - sigma * noise.grad.data
+                        noise_tmp = noise.clone()
+                        noise = lr / lr_ * noise + (1 - (lr/ lr_)) * noise_old
+                        noise_old = noise_tmp.clone()
+                        noise[lammask] = 0
 
                     # clamp adv. example to valid range
                     x_adv = torch.clamp(x + noise, *self.img_range)
                     noise = x_adv - x
+                    lr = lr_
 
-                    # save all succesful adv. examples and stop optimizing them
                     preds = torch.argmax(self.model(x_adv), dim=1)
                     mask = preds == y if self.targeted else preds != y
+                    # save successful examples
                     if mask.any():
                         tmp = result[active]
                         tmp[mask] = x_adv[mask]
                         result[active] = tmp
                         mask = torch.logical_not(mask)
                         active[active.clone()] = mask
-                        x, y, noise, G = x[mask], y[mask], noise[mask], G[mask]
-                        lams, lam, lammask = lams[mask], lam[mask], lammask[mask]
-                        eps = eps[mask]
+                        x, y, noise = x[mask], y[mask], noise[mask]
+                        lams, lam = lams[mask], lam[mask]
+                        noise_old = noise_old[mask]
+                        if j >= k_hat:
+                            lammask = lammask[mask]
 
                 noise.requires_grad = True
 
@@ -242,9 +249,9 @@ class GSEAttack(Attack):
             for i in range(B):
                 if active[i]:
                     ub_lams[i] = save_lams[i]
-                    save_lams[i] = (ub_lams[i] + save_lams[i]) / 2
+                    save_lams[i] = 0.95 * lb_lams[i] + 0.05 * save_lams[i]
                 else:
-                    l0 = (result[i] - save_x[i]).abs().mean(dim=0).norm(p=0)
+                    l0 = self.l20((result[i] - save_x[i]).unsqueeze(0)).to(self.device)
                     if l0 < best_l0[i]:
                         best_l0[i] = l0
                         result2[i] = result[i].clone()
@@ -260,7 +267,7 @@ class GSEAttack(Attack):
         return result2.detach()
 
 
-    def __f(self, x, y, kappa=0):
+    def f(self, x, y, kappa=0):
         '''
         CW loss function
         '''
@@ -274,7 +281,36 @@ class GSEAttack(Attack):
             return F.relu(Z_t - Z_i + kappa)
 
 
-    def __prox(self, grad_loss_noise, lam):
+    def extract_patches(self, x):
+        '''
+        Extracts and returns all overlapping size by size patches from
+        the image batch x.
+        '''
+        B, C, _, _ = x.shape
+        size = 8
+        kernel = torch.zeros((size ** 2, size ** 2))
+        kernel[range(size**2), range(size**2)] = 1.0
+        kernel = kernel.view(size**2, 1, size, size)
+        kernel = kernel.repeat(C, 1, 1, 1).to(x.device)
+        out = F.conv2d(x, kernel, groups=C)
+        out = out.view(B, C, size, size, -1)
+        out = out.permute(0, 4, 1, 2, 3)
+        return out.contiguous()
+    
+    def l20(self, x):
+        '''
+        Computes d_{2,0}(x[i]) for all perturbations x[i] in the batch x
+        as described in section 3.2.
+        '''
+        l20s = []
+        for x_ in x:
+            patches = self.extract_patches(x_.unsqueeze(0))
+            l2s = torch.norm(patches, p=2, dim=(2, 3, 4))
+            l20s.append((l2s != 0).float().sum().item())
+        return torch.tensor(l20s)
+
+
+    def prox(self, grad_loss_noise, lam):
         '''
         Computes the proximal operator of the 1/2-norm of the gradient of the
         adversarial loss wrt current noise.
@@ -301,6 +337,7 @@ class GSEAttack(Attack):
         grad_loss_noise[mask2] = 0
 
         return grad_loss_noise
+
 
 
 ################################### Fwnucl ####################################
@@ -336,7 +373,7 @@ class FWnucl(Attack):
             return lossfn(x, y)
 
 
-    def __call__(self, x, y):
+    def __call__(self, x, y, *args, **kwargs):
         '''
         Perform the nuclear group norm attack on a batch of images x.
 
@@ -449,110 +486,7 @@ class FWnucl(Attack):
 
         return pert
 
-#################################### SAIF #####################################
 
-class SAIF(Attack):
-    def __init__(self, model, *args, targeted=False, img_range=(-1, 1), steps=200,
-                 r0=1, ver=False, k=25, eps=1.0, **kwargs):
-        '''
-        Implementation of the sparse Frank-Wolfe attack SAIF
-        https://arxiv.org/pdf/2212.07495.pdf
-
-        args:
-        model:         Callable, PyTorch classifier.
-        img_range:     Tuple of ints/floats, lower and upper bound of image
-                       entries.
-        targeted:      Bool, given label is used as a target label if True.
-        steps:         Int, number of FW iterations.
-        r0:            Int, parameter for step size computation.
-        ver:           Bool, print progress if True.
-        '''
-        super().__init__(model, targeted=targeted, img_range=img_range)
-        self.steps = steps
-        self.r0 = r0
-        self.loss_fn = torch.nn.CrossEntropyLoss()
-        self.ver = ver
-        self.k = k
-        self.eps = eps
-
-
-    def __call__(self, x, y):
-        '''
-        Perform the  attack on a batch of images x.
-
-        args:
-        x:   Tensor of shape [B, C, H, W], batch of images.
-        y:   Tensor of shape [B], batch of labels.
-        k:   Int, sparsity parameter,
-        eps: Float, perturbation magnitude parameter.
-
-        Returns a tensor of the same shape as x containing adversarial examples.
-        '''
-        B, C, H, W = x.shape
-        x = x.to(self.device)
-        y = y.to(self.device)
-        batchidx = torch.arange(B).view(-1, 1)
-
-        # compute p_0 and s_0
-        x_ = x.clone()
-        x_.requires_grad = True
-        out = self.model(x_)
-        loss = -self.loss_fn(out, y)
-        loss.backward()
-        p = -self.eps * x_.grad.sign()
-        p = p.detach()
-        ksmallest = torch.topk(-x_.grad.view(B, -1), self.k, dim=1)[1]
-        ksmask = torch.zeros((B, C * H * W), device=self.device)
-        ksmask[batchidx, ksmallest] = 1
-        s = ksmask.view(B, C, H, W).detach().float()
-
-        r = self.r0
-
-        for t in range(self.steps):
-            if self.ver:
-                print(f'\r Iteration {t+1}/{self.steps}', end='')
-            p.requires_grad = True
-            s.requires_grad = True
-
-            D = self.__Dtadv(x, s, p, y)
-            D.backward()
-            mp = p.grad
-            ms = s.grad
-
-            with torch.no_grad():
-                # inf-norm LMO
-                v = - self.eps * mp.sign()
-
-                # 1-norm LMO
-                ksmallest = torch.topk(-ms.view(B, -1), self.k, dim=1)[1]
-                ksmask = torch.zeros((B, C * H * W), device=self.device)
-                ksmask[batchidx, ksmallest] = 1
-                ksmask = ksmask.view(B, C, H, W)
-                z = torch.logical_and(ksmask, ms < 0).float()
-
-                # update stepsize until primal progress is made
-                mu = 1 / (2 ** r * math.sqrt(t + 1))
-                while self.__Dtadv(x, s + mu * (z - s), p + mu * (v - p), y) > D:
-                    r += 1
-                    mu = 1 / (2 ** r * math.sqrt(t + 1))
-
-                p = p + mu * (v - p)
-                s = s + mu * (z - s)
-
-                x_adv = torch.clamp(x + p, *self.img_range)
-                p = x_adv - x
-
-        if self.ver:
-            print('')
-        return (x + s * p).detach()
-
-
-    def __Dtadv(self, x, s, p, y):
-        out = self.model(x + s * p)
-        if self.targeted:
-            return self.loss_fn(out, y)
-        else:
-            return -self.loss_fn(out, y)
 
 ################################## StrAttack ##################################
 
@@ -603,7 +537,7 @@ class StrAttack(Attack):
         return torch.clamp(Zdif + self.kappa, min=0.0)
 
 
-    def __call__(self, imgs, labs):
+    def __call__(self, imgs, labs, *args, **kwargs):
         '''
         Perform StrAttack on a batch of images x with corresponding labels y.
 
@@ -621,7 +555,7 @@ class StrAttack(Attack):
 
         alpha, tau, gamma = 5, 2, 1
         eps = torch.full_like(imgs, 1.0)
-        # 8 for imagenet, 2 for CIFAR and MNIST
+        # 16 for imagenet, 2 for CIFAR and MNIST
         filterSize = 8 if sh[-1] > 32 else 2
         stride = filterSize
         # convolution kernel used to compute norm of each group
@@ -631,15 +565,15 @@ class StrAttack(Attack):
         lower_bound = torch.zeros(batch_size)
         upper_bound = torch.ones(batch_size) * self.max_c
 
-        o_bestl2 = torch.full_like(labs, 1e10)
-        o_bestscore = torch.full_like(labs, -1)
+        o_bestl2 = torch.full_like(labs, 1e10, dtype=torch.float)
+        o_bestscore = torch.full_like(labs, -1, dtype=torch.float)
         o_bestattack = imgs.clone()
         o_besty = torch.ones_like(imgs)
 
         for step in range(self.search_steps):
 
-            bestl2 = torch.full_like(labs, 1e10)
-            bestscore = torch.full_like(labs, -1)
+            bestl2 = torch.full_like(labs, 1e10, dtype=torch.float)
+            bestscore = torch.full_like(labs, -1, dtype=torch.float)
 
             z, v, u, s = (torch.zeros_like(imgs) for _ in range(4))
 
@@ -704,12 +638,12 @@ class StrAttack(Attack):
         del v, u, s, z_grads, w, tmp
 
         if self.retrain:
-            cs = torch.full_like(labs, 5.0)
+            cs = torch.full_like(labs, 5.0, dtype=torch.float)
             zeros = torch.zeros_like(imgs)
 
             for step in range(8):
-                bestl2 = torch.full_like(labs, 1e10)
-                bestscore = torch.full_like(labs, -1)
+                bestl2 = torch.full_like(labs, 1e10, dtype=torch.float)
+                bestscore = torch.full_like(labs, -1, dtype=torch.float)
 
                 Nz = o_besty[o_besty != 0]
                 e0 = torch.quantile(Nz.abs(), 0.03)
@@ -786,6 +720,7 @@ class StrAttack(Attack):
         return z.grad.data
 
 
+
 ################################# Homotopy ####################################
 
 class HomotopyAttack(Attack):
@@ -849,7 +784,7 @@ class HomotopyAttack(Attack):
         self.n_segments = n_segments
 
 
-    def __call__(self, x, y):
+    def __call__(self, x, y, *args, **kwargs):
         '''
         Performs the attack.
 
@@ -1451,397 +1386,528 @@ class HomotopyAttack(Attack):
         else :
             return torch.sum(torch.max(real-other, kappa))
 
-class SAAPF(Attack):
-    def __init__(self,
-                 model,
-                 categories=10,
-                 device='cuda:0',  
-                 max_iters=10, 
-                 lambda_1_max_iters=6, 
-                 targeted=True, 
-                 ver=True, 
-                 img_range=(0, 1), 
-                 k=200,
-                 lambda_1=1e-3,
-                 lambda_2=1e-3,
-                 init_lambda_1 = 1e-3,
-                 lambda_1_LB=0,
-                 lambda_1_UB=100,
-                 loss='ce',
-                 ):
+
+
+################################### SAPF ######################################
+
+class SAPF(Attack):
+    def __init__(self, model, *args, targeted=True, img_range=(-1, 1), iters=10, 
+                 iters_delta=200, iters_G=200, etas=(0.1, 0.1), eta_decay=0.9,
+                 rhos=(5e-3, 5e-3, 5e-3, 1e-4), rhos_max=(20, 20, 100, 0.01),
+                 k=350, lam1=1e-3, lam2=10, lam1_bounds=(0, 100), loss='cw',
+                 nsegs=150, search_steps=10, sequential=False, **kwargs):
         """
         Implementation of Sparse Adversarial Attack via Perturbation Factorization 
         https://www.ecva.net/papers/eccv_2020/papers_ECCV/papers/123670035.pdf
-        Adapted from https://github.com/wubaoyuan/Sparse-Adversarial-Attack/
+        Authors' implementation: https://github.com/wubaoyuan/Sparse-Adversarial-Attack/
 
-        Args:
-            model:                  Callable, Pytorch Classifier 
-            categories:             Int, number of image labels for the dataset. For CIFAR10, set to 10. For IMAGENET, set to 1000. Defaults to 10.
-            max_iters:              Int, maximum number of iterations to iter between G and epsilon. Defaults to 1.
-            lambda_1_max_iters:     Int, maximum number of iterations for binary search of lambda_1. Defaults to 6.
-            targeted:               Bool, given label is used as a target label if set to True. Defaults to False.
-            ver:                    Bool, print Progress if set to True. Defaults to True.
-            img_range:              Tuple, lower and upper bound of the image entries. Defaults to (0, 1).
-            k:                      Int, maximum number of noised pixels. Defaults to 200.
-            lambda_1:               Float. Defaults to 1e-3.
-            lambda_2 :              Float. Defaults to 1e-3.
-            init_lambda_1:          Float, initial value of lambda_1. Defaults to 1e-3.
-            lambda_1_LB:            Int, upper bound for lambda_1. Defaults to 0.
-            lambda_1_UB:            Int, lower bound for lambda_1. Defaults to 100.
-            loss:                   String, loss function to use, 'cw' for Carlini Wagner Loss and 'ce' for Cross Entropy Loss. Defaults to 'cw'.
+        args:
+        model:         Callable, PyTorch classifier.
+        img_range:     Tuple of int/float, lower and upper bound of image entries.
+        targeted:      Bool, given label is used as a target label if True.
+        iters:         Int, number of iterations.
+        iters_delta:   Int, number of iterations for the delta update.
+        iters_G:       Int, number of iterations for the G update.
+        etas:          Tuple of float, step sizes for delta / G update.
+        eta_decay:     Float, decay factor for the step sizes.
+        rhos:          Tuple of float, ADMM penalty parameters.
+        rhos_max:      Tuple of float, maximum values for the ADMM parameters.
+        k:             Int, sparsity parameter.
+        lam1:          Float, inverse of l2 trade-off parameter.
+        lam2:          Float, group-wise sparsity trade-off parameter.
+        lam1_bounds:   Tuple of float, lower and upper bound for binary sarch in lam1.
+        loss:          String, 'ce': cross entropy loss, 'cw': Carlini-Wagner loss.
+        nsegs:         Int, number of segments for SLIC.
+        search_steps:  Int, number of binary search steps wrt. lam1.
+        sequential:    Bool, perturbations are computed sequentially for all
+                       images in the batch if True. For fair comparison to
+                       Homotopy attack.
         """
 
         super().__init__(model, targeted, img_range)
-
-        self.categories = categories
-        self.init_lambda1 = init_lambda_1
+        self.iters = iters
+        self.iters_delta = iters_delta
+        self.iters_G = iters_G
+        self.etas = etas
+        self.eta_decay = eta_decay
+        self.rhos = rhos
+        self.rhos_max = rhos_max
         self.k = k
-        self.lambda1 = lambda_1
-        self.lambda2 = lambda_2
-        self.lambda1_search_times = lambda_1_max_iters
-        self.lambda_1_LB = lambda_1_LB
-        self.lambda_1_UB = lambda_1_UB
-        self.loss = loss
-        self.max_iters = max_iters
-        self.ver = ver
+        self.lam1 = lam1
+        self.lam2 = lam2
+        self.lam1_bounds = lam1_bounds
+        self.nsegs = nsegs
+        self.search_steps = search_steps
+        self.sequential = sequential
 
-    def __call__(self, x, y):
-        """
-        Call the attack for a batch of images x.
+        if loss == 'ce':
+            self.lossfn = lambda x, y: (2 * self.targeted - 1) * F.cross_entropy(self.model(x), y)
+        elif loss == 'cw':
+            self.lossfn = self.__CWLoss
+        else:
+            raise NotImplementedError(f'No loss function implemented for loss = {loss}')
 
-        Args:
-            x: Tensor of shape [B, C, H, W], batch of images.
-            y: Tensor of shape [B], batch of labels.
 
-        Returns:
-            Returns a tensor of the same shape as x containing adversarial examples
-        """
-        return (x + self.saapf(x,y)).detach()
 
-    def saapf(self, x, y):
-        """
-        Perfroms the attack on the batch of images
-        Args:
-            x: Tensor of shape [B, C, H, W], batch of images.
-            y: Tensor of shape [B], batch of labels.
+    def __call__(self, x, y, *args, **kwargs):
+        '''
+        Call the attack for a batch of images x or sequentially for all images
+        in x depending on self.sequential.
 
-        Returns:
-            Returns a tensor of the same shape as x of element-wise multiplication of epsilon and G 
-        """
-        torch.backends.cudnn.deterministic=True
-        for param in self.model.parameters():
-            param.requires_grad = False
-        self.model.eval()
+        args:
+        x:   Tensor of shape [B, C, H, W], batch of images.
+        y:   Tensor of shape [B], batch of labels.
 
-        x_clone = x.clone()
-        B_array = []
-        
-        for image in range(x.shape[0]):
-
-            permuted_img = x_clone[image].permute(1,2,0)
-            image_4_mask = np.array(permuted_img.cpu(), dtype=np.uint8)  
-            segments = skimage.segmentation.slic(image_4_mask, n_segments=150, compactness=10)
-
-            block_num = max(segments.flatten())+1 - min(segments.flatten())     
-            B = np.zeros((block_num, x.shape[1], x.shape[3], x.shape[2]))
+        Returns a tensor of the same shape as x containing adversarial examples
+        '''
+        if self.sequential:
+            result = x.clone()
+            for i, (x_, y_) in enumerate(zip(x, y)):
+                result[i] = self.__perform_att(x_.unsqueeze(0),
+                                               y_.unsqueeze(0)).detach()
+            return result
+        else:
+            return self.__perform_att(x, y)
             
-            for index in range(min(segments.flatten()),max(segments.flatten())+1):
-                mask = (segments == index)
-                B[index-1,:,mask] = 1
 
-            B = torch.from_numpy(B).float().to(self.device)     
-            B_array.append(B)   
 
-        noise_Weight = self.compute_sensitive(x, weight_type='gradient')
-        G, epsilon = self.train_adptive(x, y, B_array, noise_Weight)
-        return epsilon * G
+    def __perform_att(self, x, y):
+        '''
+        Perform the attack on a batch of images x.
 
-    def train_adptive(self, x, target, B, noise_Weight):
-        """
-        Peforms Binary search of lambda_1.
-        """
-        self.lambda1 = self.init_lambda1
-        lambda1_upper_bound = self.lambda_1_UB
-        lambda1_lower_bound = self.lambda_1_LB
-        
-        for search_time in range(1, self.lambda1_search_times+1):
+        args:
+        x:   Tensor of shape [B, C, H, W], batch of images.
+        y:   Tensor of shape [B], batch of labels.
 
-            if self.ver:
-                print(f"Binary step {search_time}/{self.lambda1_search_times}")
-            results = self.train_sgd_atom(x, target, B, noise_Weight)
+        Returns a tensor of the same shape as x containing adversarial examples.
+        '''
+
+        # save a list with one tensor per image. each tensor is a batch of [C, H, W]
+        # masks, one for each segment/super pixel in the image
+        segments = []
+        for idx in range(x.size(0)):
+            nprgb = np.array(x[idx].permute(1, 2, 0).cpu(), dtype=np.uint8)
+            segs = torch.from_numpy(skimage.segmentation.slic(nprgb, n_segments=self.nsegs, compactness=10))
+            segmask = torch.zeros((segs.max()-segs.min()+1, *x.shape[1:]), dtype=x.dtype)
+            for i in range(segmask.size(0)):
+                segmask[i, :, segs==i+1] = 1
+            segments.append(segmask.to(self.device))
+
+        x = x.to(self.device)
+        y = y.to(self.device)
+        result = x.clone()
+        # tensors for binary search
+        best_l0 = torch.full_like(y, torch.inf, dtype=torch.float)
+        active = torch.ones_like(y, dtype=torch.bool)
+        lam1 = torch.full_like(y, self.lam1, dtype=torch.float)
+        lam_lb = torch.full_like(y, self.lam1_bounds[0], dtype=torch.float)
+        lam_ub = torch.full_like(y, self.lam1_bounds[1], dtype=torch.float)
+
+        for i in range(self.search_steps):
+            if x.size(0) == 0:
+                break
+            print(i+1)
+            delta, G = self.__perturb(x, y, lam1.view(-1, 1, 1, 1), segments)
             
-                
-            if search_time < self.lambda1_search_times:
-                if results['status'] == True:
-                    if self.lambda1 < 0.01*self.init_lambda1:  
-                        break
-                    # success, divide lambda1 by two
-                    lambda1_upper_bound = min(lambda1_upper_bound,self.lambda1)
-                    if lambda1_upper_bound < self.lambda_1_UB:
-                        self.lambda1 = (lambda1_upper_bound+ lambda1_lower_bound)/2
+            # clamp adv. example to valid range
+            x_adv = torch.clamp(x + delta * G, *self.img_range)
+            preds = torch.argmax(self.model(x_adv), dim=1)
+            mask = preds == y if self.targeted else preds != y
+
+            # binary search on lam1
+            for j in range(x.size(0)):
+                if mask[j]:
+                    lam_ub[j] = min(lam1[j], lam_ub[j])
+                    if lam_ub[j] < self.lam1_bounds[1]:
+                        lam1[j] = (lam_ub[j] + lam_lb[j]) / 2
+                    l0 = torch.norm(x_adv[j] - x[j], p=0)
+                    if l0 < best_l0[j]:
+                        result[active.nonzero()[j]] = x_adv[j]
+                        best_l0[j] = l0
                 else:
-                    # failure, either multiply by 10 if no solution found yet
-                    # or do binary search with the known upper bound
-                    lambda1_lower_bound = max(lambda1_lower_bound, self.lambda1)
-                    if lambda1_upper_bound < self.lambda_1_UB:
-                        self.lambda1 = (lambda1_upper_bound+ lambda1_lower_bound)/2
+                    lam_lb[j] = max(lam_lb[j], lam1[j])
+                    if lam_ub[j] < self.lam1_bounds[1]:
+                        lam1[j] = (lam_ub[j] + lam_lb[j]) / 2
                     else:
-                        self.lambda1 *= 10     
+                        lam1[j] *= 10
 
-        return results['G'], results['epsilon'] 
+            mask = lam1 < 0.01 * self.lam1
+            # stop search if lam1 falls below minimum value
+            if mask.any():
+                mask = torch.logical_not(mask)
+                active[active.clone()] = mask
+                x, y = x[mask], y[mask]
+                lam1, lam_lb, lam_ub = lam1[mask], lam_lb[mask], lam_ub[mask]
+                segments = [segments[j] for j in range(len(segments)) if j in mask.nonzero()]
+                best_l0 = best_l0[mask]
 
-    def train_sgd_atom(self, x, target_label, B, noise_Weight):
-        """
-        Performs iterative optimization of epsilon and G.
-        """
-        target_label_tensor=target_label.clone()
+        return result.detach()
 
-        G = torch.ones_like(x, dtype=torch.float32, device=self.device)
-        epsilon = torch.zeros_like(x, dtype=torch.float32, device=self.device)
 
-        rho1 = 5e-3
-        rho2 = 5e-3
-        rho3 = 5e-3
-        rho4 = 1e-4
-        
-        cur_lr_e = 0.1
-        cur_lr_g = {'cur_step_g': 0.1, 'cur_rho1': rho1, 'cur_rho2': rho2, 'cur_rho3': rho3,'cur_rho4': rho4}
-        
-        for mm in range(1,self.max_iters + 1):  
-            epsilon, cur_lr_e = self.update_epsilon(x, target_label_tensor, epsilon, G, cur_lr_e, B, noise_Weight, mm, False)
-            G, cur_lr_g = self.update_G(x, target_label_tensor, epsilon, G, cur_lr_g, B, noise_Weight, mm)
+    def __perturb(self, x, y, lam1, segments):
+        '''
+        Compute adversrial perturbation for a given trade-off parameter lam1.
+        '''
+        G = torch.ones_like(x)
+        delta = torch.zeros_like(x)
+        eta_delta, eta_G = self.etas
+        rhos = self.rhos
 
-            if self.ver:
-                print(f"{mm}/{self.max_iters}")
-
+        for i in range(self.iters):
+            delta, eta_delta = self.__update_delta(x, y, delta, G, eta_delta, lam1, False)
+            G, rhos, eta_G = self.__update_G(x, y, delta, G, rhos, eta_G, lam1, segments, i)
         G = (G > 0.5).float()
-        # recording results per iteration
-        if self.targeted:
-            num_correct = (torch.argmax(self.model(x + epsilon * G),dim=1) == target_label)
-        else:
-            num_correct = (torch.argmax(self.model(x + epsilon * G), dim=1) != target_label)
-        num_correct = num_correct.float().mean()
+        delta, _ = self.__update_delta(x, y, delta, G, eta_delta, lam1, True)
 
-        if num_correct > 0.5:
-            results_status=True
-        else:
-            results_status=False
-        
-        results = {
-            'status': results_status,
-            'G' : G.detach(),
-            'epsilon' : epsilon.detach(),
-        }
-        return results
+        return delta, G
 
-    def update_epsilon(self, x, target_label, epsilon, G, init_lr, B, noise_Weight, out_iter, finetune):
-        """
-        Method for updating epsilon.
-        """
-        cur_step = init_lr
-        train_epochs = int(2000/2.0) if finetune else 2000
-    
-        for cur_iter in range(1,train_epochs+1): 
-            epsilon.requires_grad = True  
-            G.requires_grad = False
-            
-            images_s = x + torch.mul(epsilon, G) 
-            images_s = torch.clamp(images_s,self.img_range[0], self.img_range[1])
-            prediction = self.model(images_s)
-            
-            #loss
-            if self.loss == 'ce':
-                ce = nn.CrossEntropyLoss()
-                if self.targeted:
-                    loss = ce(prediction, target_label)
-                else:
-                    loss = -ce(prediction, target_label)
-            elif self.loss == 'cw':    
-                one_hot_y = F.one_hot(target_label, prediction.size(1))
-                Z_t = torch.sum(prediction * one_hot_y, dim=1)
-                Z_i = torch.amax(prediction * (1 - one_hot_y) - (one_hot_y * 1e5), dim=1)
-                if self.targeted:
-                    loss = F.relu(Z_i - Z_t + 0).mean()
-                else:
-                    loss =  F.relu(Z_t - Z_i + 0).mean()
 
-            if epsilon.grad is not None:  #the first time there is no grad
-                epsilon.grad.data.zero_()
-            
-            loss.backward(retain_graph=True)
-            epsilon_cnn_grad = epsilon.grad
-            epsilon_grad = 2*epsilon*G*G*noise_Weight*noise_Weight + self.lambda1 * epsilon_cnn_grad
-            epsilon = epsilon - cur_step * epsilon_grad
-            epsilon = epsilon.detach()  
-            
-            
-            # updating learning rate
-            if cur_iter % 50 == 0:
-                cur_step = max(cur_step*0.9, 0.001) 
+    def __update_delta(self, x, y, delta, G, eta, lam1, finetune):
+        '''
+        Update delta via gradient descent.
+        '''
+        iters = int(self.iters_delta / 2) if finetune else self.iters_delta
 
-        return epsilon, cur_step
-    
-    def update_G(self, x, target_label, epsilon, G, init_params, B, noise_Weight, out_iter):
-        """
-        Method for updating G.
-        """
-        cur_step = init_params['cur_step_g']
-        cur_rho1 = init_params['cur_rho1']
-        cur_rho2 = init_params['cur_rho2']
-        cur_rho3 = init_params['cur_rho3']
-        cur_rho4 = init_params['cur_rho4']
-
-        # initialize y1, y2 as all 1 matrix, and z1, z2, z4 as all zeros matrix
-        y1 = torch.ones_like(G)
-        y2 = torch.ones_like(G)
-        y3 = torch.ones_like(G)
-        z1 = torch.zeros_like(G)
-        z2 = torch.zeros_like(G)
-        z3 = torch.zeros_like(G)
-        z4 = torch.zeros(1, device=self.device)
-        ones = torch.ones_like(G)
-
-        for cur_iter in range(1,2000+1): 
-            G.requires_grad = True
-            epsilon.requires_grad = False
-            
-            # 1.update y1 & y2
-            y1 = torch.clamp((G.detach() + z1/cur_rho1), 0.0, 1.0)
-            y2 = self.project_shifted_lp_ball(G.detach() + z2/cur_rho2, 0.5*torch.ones_like(G))      
-            
-            # 2.update y3
-            C=G.detach()+z3/cur_rho3
-            for image_index in range(len(B)):   
-                BC = C[image_index]*B[image_index]                                       
-                n,c,w,h = BC.shape
-                Norm = torch.norm(BC.reshape(n, c*w*h), p=2, dim=1).reshape((n,1,1,1))   
-                coefficient = 1-self.lambda2/(cur_rho3*Norm)    
-                coefficient = torch.clamp(coefficient, min=0)   
-                BC = coefficient*BC                           
-                y3[image_index] = torch.sum(BC, dim=0)  
-            
-            # 3.update G
-            #cnn_grad_G
-            image_s = x + torch.mul(G, epsilon)
-            image_s = torch.clamp(image_s, self.img_range[0], self.img_range[1])
-            prediction = self.model(image_s)
-            
-            if self.loss == 'ce':
-                ce = nn.CrossEntropyLoss()
-                
-                if self.targeted:
-                    loss = ce(prediction, target_label)   
-                else:
-                    loss = -ce(prediction, target_label)
-            elif self.loss == 'cw':
-                one_hot_y = F.one_hot(target_label, prediction.size(1))
-                Z_t = torch.sum(prediction * one_hot_y, dim=1)
-                Z_i = torch.amax(prediction * (1 - one_hot_y) - (one_hot_y * 1e5), dim=1)
-                if self.targeted:
-                    loss = F.relu(Z_i - Z_t + 0).mean()
-                else:
-                    loss =  F.relu(Z_t - Z_i + 0).mean()
-            
-            if G.grad is not None:  #the first time there is no grad
-                G.grad.data.zero_()
+        for j in range(iters):
+            delta.requires_grad = True
+            loss = self.lossfn(torch.clamp(x + delta * G, *self.img_range), y)
             loss.backward()
-            cnn_grad_G = G.grad
-            
-            grad_G = 2*G*epsilon*epsilon*noise_Weight*noise_Weight + self.lambda1*cnn_grad_G \
-                    + z1 + z2 + z3+ z4.unsqueeze(1).unsqueeze(2).unsqueeze(3)*ones + cur_rho1*(G-y1) \
-                    + cur_rho2*(G-y2)+ cur_rho3*(G-y3) \
-                    + cur_rho4*(torch.sum(G,dim=(1,2,3)).unsqueeze(1).unsqueeze(2).unsqueeze(3) - self.k)*ones
-            G = G - cur_step*grad_G
-            G = G.detach()
-            
-            # 4.update z1,z2,z3,z4
-            z1 = z1 + cur_rho1 * (G.detach() - y1)
-            z2 = z2 + cur_rho2 * (G.detach() - y2)
-            z3 = z3 + cur_rho3 * (G.detach() - y3)
-            z4 = z4 + cur_rho4 * (torch.sum(G,dim=(1,2,3))-self.k)
+            grad = delta.grad.data
 
-            # 5.updating rho1, rho2, rho3, rho4
-            if cur_iter % 1 == 0:
-                cur_rho1 = min(1.01 * cur_rho1, 20)
-                cur_rho2 = min(1.01 * cur_rho2, 20)
-                cur_rho3 = min(1.01 * cur_rho3, 100)
-                cur_rho4 = min(1.01 * cur_rho4, 0.01)
+            with torch.no_grad():
+                grad = 2 * delta * G * G + lam1 * grad
+                delta = delta - eta * grad
+
+                if not j % 50:
+                    eta = max(eta * self.eta_decay, 0.001)
+
+        return delta, eta
+
+
+    def __update_G(self, x, y, delta, G, rhos, eta, lam1, segments, it):
+        '''
+        Update G via ADMM.
+        '''
+        rho1, rho2, rho3, rho4 = rhos
+        # y1, z1: box constraint, y2, z2: l2 sphere, y3, z3: group sparsity, z4: sparsity
+        y1, y2, y3 = torch.ones_like(G), torch.ones_like(G), torch.ones_like(G)
+        z1, z2, z3 = torch.zeros_like(G), torch.zeros_like(G), torch.zeros_like(G)
+        z4 = torch.zeros((G.size(0), 1, 1, 1), device=self.device, dtype=G.dtype)
+
+        for j in range(self.iters_G):
+            # update primals
+            with torch.no_grad():
+                y1 = torch.clamp(G + z1 / rho1, 0, 1)
+                y2 = self.__project_l2(G + z2 / rho2)
+                for idx in range(G.size(0)):
+                    seg = (G[idx] + z3[idx] / rho3) * segments[idx]
+                    norm = torch.norm(seg, p=2, dim=(1,2,3), keepdim=True)
+                    coeff = torch.clamp(1 - self.lam2 / (rho3 * norm), 0)
+                    y3[idx] = torch.sum(coeff * seg, dim=0)
+
+            # update G
+            G.requires_grad = True
+            loss = self.lossfn(torch.clamp(x + delta * G, *self.img_range), y)
+            loss.backward()
+            grad = G.grad.data
+
+            with torch.no_grad():
+                grad = 2 * G * delta * delta + lam1 * grad
+                grad = grad + z1 + z2 + z3 + z4
+                grad = grad + rho1 * (G - y1) + rho2 * (G - y2) + rho3 * (G - y3)
+                grad = grad + rho4 * (torch.sum(G, dim=(1,2,3), keepdim=True) - self.k)
+                G = G - eta * grad
+
+                # update duals
+                z1 += rho1 * (G - y1)
+                z2 += rho2 * (G - y2)
+                z3 += rho3 * (G - y3)
+                z4 += rho4 * (torch.sum(G, dim=(1,2,3), keepdim=True) - self.k)
+
+                rho1 = min(1.01 * rho1, self.rhos_max[0])
+                rho2 = min(1.01 * rho2, self.rhos_max[1])
+                rho3 = min(1.01 * rho3, self.rhos_max[2])
+                rho4 = min(1.01 * rho4, self.rhos_max[3])
+
+                if not j % 50:
+                    eta = max(eta * self.eta_decay, 0.001)
+
+        return G, (rho1, rho2, rho3, rho4), eta
+
+
+    def __project_l2(self, x):
+        '''
+        Project x on an l2 sphere translated by the all 0.5 vector.
+        '''
+        trans = torch.full_like(x, 0.5)
+        norm = torch.norm(x - trans, p=2, dim=(1, 2, 3), keepdim=True)
+        return (math.sqrt(float(x[0].numel())) / 2) * ((x - trans) / norm) + trans
                 
-            # updating learning rate
-            if cur_iter % 50 == 0:
-                cur_step = max(cur_step*0.9, 0.001)
 
-            cur_iter = cur_iter + 1
-
-        res_param = {'cur_step_g': cur_step, 'cur_rho1': cur_rho1,'cur_rho2': cur_rho2, 'cur_rho3': cur_rho3,'cur_rho4': cur_rho4}
-        return G, res_param
-
+    def __CWLoss(self, x, y, kappa=0):
+        '''
+        CW loss function.
+        '''
+        logits = self.model(x)
+        one_hot_y = F.one_hot(y, logits.size(1))
+        Z_t = torch.sum(logits * one_hot_y, dim=1)
+        Z_i = torch.amax(logits * (1 - one_hot_y) - (one_hot_y * 1e5), dim=1)
+        return F.relu((2 * self.targeted - 1) * (Z_i - Z_t) + kappa).sum()
     
-    def project_shifted_lp_ball(self, x, shift_vec):
-        """
-        Performs projection onto the box constraint S_b.
-        """
-        shift_x = x - shift_vec
 
-        # compute L2 norm: sum(abs(v)^2)^(1/2)
-        norm2_shift = torch.norm(shift_x, 2, dim=(1,2,3))
 
-        n = float(x.numel())
-        xp = (n**(1/2))/2 * (shift_x / norm2_shift.unsqueeze(1).unsqueeze(2).unsqueeze(3)) + shift_vec
-        return xp
+################################## SparseRS #####################################
 
-    def compute_sensitive(self, x, weight_type='none'):
-        """
-        Computes sensitive.
-        """
-        weight = torch.ones_like(x) 
-        n, c, h, w = x.shape   #1,3,299,299
+class SparseRS(Attack):
+    def __init__(self, model, *args, targeted=False, img_range=(-1, 1),
+                 n_queries=10000, k=100, n_restarts=10, alpha_init=0.8, **kwargs):
+        '''
+        Implementation of the L0 variant SparseRS https://arxiv.org/abs/2006.12834
+        Authors' implementation: https://github.com/fra31/sparse-rs
         
-        if weight_type == 'none':
-            return weight
-            
-        else:
-            if weight_type == 'gradient':
-                from scipy.ndimage import filters
+        args:
+        model:         Callable, PyTorch classifier.
+        targeted:      Bool, given label is used as a target label if True.
+        img_range:     Tuple of ints/floats, lower and upper bound of image
+                       entries.
+        n_queries:     Int, max number of queries to the model
+        k:             Int, initial sparsity parameter
+        n_restarts:    Int, number of restarts with random initialization
+        alpha_init:    Float, inital value for alpha schedule
+        '''
+        super().__init__(model, targeted=targeted, img_range=img_range)
+        self.n_queries = n_queries
+        self.k = k
+        self.n_restarts = n_restarts
+        self.alpha_init = alpha_init
 
-                weight = torch.zeros_like(x)
-                for image_index in range(x.shape[0]):
-                    im = x[image_index].permute(1,2,0)                            #229,229,3
-                    im_Prewitt_x = torch.zeros(im.shape ,dtype=torch.float32, device=self.device)
-                    im_Prewitt_y = torch.zeros(im.shape ,dtype=torch.float32, device=self.device)
-                    im_Prewitt_xy = torch.zeros(im.shape ,dtype=torch.float32, device=self.device)
+
+    def __call__(self, x, y, *args, **kwargs):
+        '''
+        Perform SparseRS L0 on a batch of images x with corresponding labels y.
+
+        args:
+        x:   Tensor of shape [B, C, H, W], batch of images.
+        y:   Tensor of shape [B], batch of labels.
+
+        Returns a tensor of the same shape as x containing adversarial examples
+        '''
+        torch.random.manual_seed(0)
+        torch.cuda.random.manual_seed(0)
+        x = x.to(self.device)
+        y = y.to(self.device)
+        active = torch.ones_like(y, dtype=torch.bool)
+        result = x.clone()
+
+        with torch.no_grad():
+            for _ in range(self.n_restarts):
+                if len(x) == 0:
+                    break
+
+                x_adv = self.__perturb(x.clone(), y.clone())
+                preds = torch.argmax(self.model(x_adv), dim=1)
+                mask = preds == y if self.targeted else preds != y
+                # save successful examples
+                if mask.any():
+                    tmp = result[active]
+                    tmp[mask] = x_adv[mask]
+                    result[active] = tmp
+                    mask = torch.logical_not(mask)
+                    active[active.clone()] = mask
+                    x, y = x[mask], y[mask]
+
+        return result.detach()
+    
+
+    def __perturb(self, x, y):
+        '''
+        Perform the attack from a random starting point.
+        '''
+        B, C, H, W = x.shape
+        batchidx = torch.arange(B, device=self.device).view(-1, 1)
+        result = x.clone()
+        active = torch.ones_like(y, dtype=torch.bool)
+
+        # M: set of perturbed pixel indices, U_M: set of unperturbed pixel indices
+        batch_randperm = torch.rand(B, H * W, device=self.device).argsort(dim=1)
+        M = batch_randperm[:, :self.k]
+        U_M = batch_randperm[:, self.k:]
+        result[batchidx, :, M//W, M%H] = self.__sampleDelta(B, C, self.k)
+
+        best_margin, best_loss = self.__lossfn(result, y)
+
+        for i in range(1, self.n_queries):
+            if B == 0:
+                break
+            # reset k_i currently perturbed pixels and perturb k_i new pixels
+            k_i = max(int(self.__alphaSchedule(i) * self.k), 1)
+            A_idx = torch.randperm(self.k, device=self.device)[:k_i]
+            B_idx = torch.randperm(H * W - self.k, device=self.device)[:k_i]
+            A_set, B_set = M[:, A_idx], U_M[:, B_idx]
+
+            z = result[active].clone()
+            z[batchidx, :, A_set//W, A_set%H] = x[batchidx, :, A_set//W, A_set%H]
+            if k_i > 1:
+                z[batchidx, :, B_set//W, B_set%H] = self.__sampleDelta(B, C, k_i)
+            else: # if only one pixel is changed, make sure it actually changes
+                new_color = self.__sampleDelta(B, C, k_i)
+                while (mask := (z[batchidx, :, B_set//W, B_set%H] == new_color).view(B, -1).all(dim=-1)).any():
+                    new_color[mask] = self.__sampleDelta(mask.int().sum().item(), C, k_i)
+                z[batchidx, :, B_set//W, B_set%H] = new_color
+
+            # save perturbations that improved the loss/margin
+            margin, loss = self.__lossfn(z, y)
+            mask = loss < best_loss
+            best_loss[mask] = loss[mask]
+            mask = torch.logical_or(mask, margin < -1e-6)
+            if mask.any():
+                best_margin[mask] = margin[mask]
+                tmp = result[active]
+                tmp[mask] = z[mask]
+                result[active] = tmp
+                U_M[mask.nonzero().view(-1, 1), B_idx] = A_set[mask]
+                M[mask.nonzero().view(-1, 1), A_idx] = B_set[mask]
             
-                    filters.prewitt(im.cpu().numpy(), 1, im_Prewitt_x.cpu().numpy())
-                    filters.prewitt(im.cpu().numpy(), 0, im_Prewitt_y.cpu().numpy())
-                    im_Prewitt_xy = torch.sqrt(im_Prewitt_x ** 2 + im_Prewitt_y ** 2) 
-                    
-                    im_Prewitt_xy = im_Prewitt_xy.permute(2,0,1)
-                    weight[image_index] = im_Prewitt_xy.clone().float()
-        
-            else:
-                for i in range(h):
-                    for j in range(w):
-                        left = max(j - 1, 0)
-                        right = min(j + 2, w)
-                        up = max(i - 1, 0)
-                        down = min(i + 2, h)
-                        
-                        for k in range(c):
-                            if weight_type == 'variance':
-                                weight[0, k, i, j] = torch.std(x[0, k, up:down, left:right])
-                            elif weight_type == 'variance_mean':
-                                weight[0, k, i, j] = torch.std(x[0, k, up:down, left:right]) * torch.mean(x[0, k, up:down, left:right])
-                            elif weight_type == 'contrast':
-                                weight[0, k, i, j] = (torch.max(x[0, k, up:down, left:right]) - torch.min(x[0, k, up:down, left:right])) / (torch.max(x[0, k, up:down, left:right]) + torch.min(x[0, k, up:down, left:right]))
-                            elif weight_type == 'contrast_mean':
-                                contrast = (torch.max(x[0, k, up:down, left:right]) - torch.min(x[0, k, up:down, left:right])) / (torch.max(x[0, k, up:down, left:right]) + torch.min(x[0, k, up:down, left:right]))
-                                weight[0, k, i, j] = contrast * torch.mean(x[0, k, up:down, left:right])
-                                
-                            if torch.isnan(weight[0, k, i, j]):
-                                weight[0, k, i, j] = 1e-4
-                                
-            weight = 1.0 / (weight + 1e-4) 
-            for k in range(c):
-                weight[:, k, :, :] = (weight[:, k, :, :] - torch.min(weight[:, k, :, :])) / (torch.max(weight[:, k, :, :]) - torch.min(weight[:, k, :, :]))
-            
-            return weight
+            # stop working on successful adv examples
+            mask = best_margin < 0
+            if mask.any():
+                mask = torch.logical_not(mask)
+                active[active.clone()] = mask
+                x, y, z, M, U_M = x[mask], y[mask], z[mask], M[mask], U_M[mask]
+                best_margin, best_loss = best_margin[mask], best_loss[mask]
+                B = len(y)
+                batchidx = torch.arange(B, device=self.device).view(-1, 1)
+
+        return result
+
+
+    def __sampleDelta(self, B, C, k):
+        '''
+        Sample k-pixel perturbations for B images. Each pixel is assigned a
+        random corner in the C-dimensional cube defined by self.img_range.
+        '''
+        fac = self.img_range[1] - self.img_range[0]
+        return self.img_range[0] + fac * torch.randint(0, 1, [B, k, C],
+                                                       dtype=torch.float,
+                                                       device=self.device)
+    
+
+    def __alphaSchedule(self, iteration):
+        '''
+        Update number of pixels to perturb based in the current iteration.
+        '''
+        iteration = int(iteration / self.n_queries * 10000)
+        factors = [1, 2, 4, 5, 6, 8, 10, 12, 15, 20]
+        alpha_schedule = [10, 50, 200, 500, 1000, 2000, 4000, 6000, 8000]
+        idx = bisect.bisect_left(alpha_schedule, iteration)
+        return self.alpha_init / factors[idx]
+    
+
+    def __lossfn(self, x, y):
+        '''
+        Compute the loss depending on self.targeted.
+        '''
+        out = self.model(x)
+        ce = F.cross_entropy(out, y, reduction='none')
+        corr = out[range(len(out)), y]
+        out[range(len(out)), y] = -torch.inf
+        other = out.max(dim=-1)[0]
+        tfac = 2 * self.targeted - 1
+        return tfac * (other - corr), tfac * ce
+    
+
+
+################################### PGD00 ######################################
+
+class PGD0(Attack):
+    def __init__(self, model, *args, img_range=(-1, 1), k=100, n_restarts=5,
+                 targeted=False, iters=200, stepsize=120000/255., **kwargs):
+        '''
+        Implementation of the PGD0 attack https://arxiv.org/pdf/1909.05040
+        Authpr's implementation: https://github.com/fra31/sparse-imperceivable-attacks/tree/master
+
+        args:
+        model:         Callable, PyTorch classifier.
+        img_range:     Tuple of ints/floats, lower and upper bound of image
+                       entries.
+        targeted:      Bool, given label is used as a target label if True.
+        k:             Int, sparsity parameter.
+        n_restarts:    Int, number of restarts from random perturbation.
+        iters:         Int, number of gradient descent steps per restart.
+        stepsize:      Float, step size for gradient descent.
+        '''
+        super().__init__(model, img_range=img_range, targeted=targeted)
+        self.k = k
+        self.n_restarts = n_restarts
+        self.iters = iters
+        self.stepsize = stepsize
+
+
+    def __call__(self, x, y, *args, **kwargs):
+        '''
+        Perform the PGD_0 attack on a batch of images x.
+
+        args:
+        x:   Tensor of shape [B, C, H, W], batch of images.
+        y:   Tensor of shape [B], batch of labels.
+
+        Returns a tensor of the same shape as x containing adversarial examples
+        '''
+
+        x = x.to(self.device)
+        y = y.to(self.device)
+        result = x.clone()
+        active = torch.ones_like(y, dtype=torch.bool)
+
+        for _ in range(self.n_restarts):
+            if not len(x):
+                break
+            lb, ub = self.img_range[0] - x, self.img_range[1] - x
+            pert = torch.clamp(x + (ub - lb) * torch.rand_like(x) + lb, *self.img_range) - x
+            pert = self.project_L0(pert, lb, ub)
+
+            for _ in range(self.iters):
+                pert.requires_grad = True
+                loss = self.lossfn(x + pert, y)
+                loss.backward()
+                grad = pert.grad.data
+                with torch.no_grad():
+                    grad /= grad.abs().sum(dim=(1,2,3), keepdim=True) + 1e-10
+                    pert += (torch.rand_like(x) - .5) * 1e-12 - self.stepsize * grad
+                    pert = self.project_L0(pert, lb, ub)
+
+            pred = torch.argmax(self.model(x + pert), dim=1)
+            mask = pred == y if self.targeted else pred != y
+            if mask.any():
+                tmp = result[active]
+                tmp[mask] = x[mask] + pert[mask]
+                result[active] = tmp
+                mask = torch.logical_not(mask)
+                active[active.clone()] = mask
+                x, y = x[mask], y[mask]
+
+        return result
+    
+
+    def project_L0(self, pert, lb, ub):
+        '''
+        Project a batch of perturbations such that at most self.k pixels
+        are perturbed and componentwise there holds lb <= pert <= ub.
+        '''
+        B, C, H, W = pert.shape
+        p1 = torch.sum(pert ** 2, dim=1)
+        p2 = torch.clamp(torch.minimum(ub - pert, pert - lb), 0)
+        p2 = torch.sum(p2 ** 2, dim=1)
+        p3 = torch.topk(-1 * (p1 - p2).view(p1.size(0), -1), k=H*W-self.k, dim=-1)[1]
+        pert = torch.maximum(torch.minimum(pert, ub), lb)
+        pert[torch.arange(0, B).view(-1, 1), :, p3//W, p3%H] = 0
+        return pert
+
+
+    def lossfn(self, x, y):
+        '''
+        Compute the loss at x, y.
+        '''
+        out = self.model(x)
+        loss = F.cross_entropy(out, y)
+        return (2 * self.targeted - 1) * loss

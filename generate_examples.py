@@ -9,9 +9,14 @@ from models import *
 
 input_dir = './Images'
 output_dir = './Examples'
-imgfiles = ['list of image file names. e.g.', 'myimage.png']
-imglabels = ['list of labels as int']
-imgtargets = ['list of targets as int']
+imgfiles = ['bird_original.png', 'boat_original.png', 'daisy_original.png',
+            'lemon_original.png', 'racket_original.png', 'snail_original.png',
+            'turtle_original.png']#['list of image file names. e.g.', 'myimage.png']
+#imglabels = ['list of labels as ints']
+imglabels = [133, 914, 985, 951, 852, 113,  33]
+imgtargets = [898, 575, 405, 59, 575, 405, 0]
+# water bottle, golf cart, airship, vine snake, golf cart, airship
+
 
 if __name__ == "__main__":
     os.makedirs("./Examples", exist_ok=True)
