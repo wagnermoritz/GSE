@@ -9,13 +9,9 @@ from models import *
 
 input_dir = './Images'
 output_dir = './Examples'
-imgfiles = ['bird_original.png', 'boat_original.png', 'daisy_original.png',
-            'lemon_original.png', 'racket_original.png', 'snail_original.png',
-            'turtle_original.png']#['list of image file names. e.g.', 'myimage.png']
-#imglabels = ['list of labels as ints']
-imglabels = [133, 914, 985, 951, 852, 113,  33]
-imgtargets = [898, 575, 405, 59, 575, 405, 0]
-# water bottle, golf cart, airship, vine snake, golf cart, airship
+imgfiles = ['list of image file names. e.g.', 'myimage.png']
+imglabels = ['list of labels as ints']
+imgtargets = ['list of labels as ints']
 
 
 if __name__ == "__main__":
@@ -30,19 +26,20 @@ if __name__ == "__main__":
     modelVGG = torchvision.models.vgg19(weights='DEFAULT')
     modelResNet.eval().to(device)
     modelVGG.eval().to(device)
-
-    CAMResNet1 = nn.Sequential(*list(modelResNet.children())[:-2])
-    CAMResNet2 = CAMNet(latent_dim=2048).to(device)
-    CAMResNet = nn.Sequential(CAMResNet1, CAMResNet2)
-    if use_gpu:
-        state_dict = torch.load("./Saves/Models/CAMResNet50.pt")
-        CAMResNet.load_state_dict(state_dict)
-    else:
-        state_dict = torch.load("./Saves/Models/CAMResNet50.pt",
-                                map_location=torch.device('cpu'))
-        CAMResNet.load_state_dict(state_dict)
-    CAMResNet.to(device)
-    CAMResNet.eval()
+    
+    # uncomment if you have a CAM model for ResNet50 at ./Saves/Models/CAMResNet50.pt
+    # CAMResNet1 = nn.Sequential(*list(modelResNet.children())[:-2])
+    # CAMResNet2 = CAMNet(latent_dim=2048).to(device)
+    # CAMResNet = nn.Sequential(CAMResNet1, CAMResNet2)
+    # if use_gpu:
+    #     state_dict = torch.load("./Saves/Models/CAMResNet50.pt")
+    #     CAMResNet.load_state_dict(state_dict)
+    # else:
+    #     state_dict = torch.load("./Saves/Models/CAMResNet50.pt",
+    #                             map_location=torch.device('cpu'))
+    #     CAMResNet.load_state_dict(state_dict)
+    # CAMResNet.to(device)
+    # CAMResNet.eval()
 
     CAMVGG1 = nn.Sequential(*list(modelVGG.children())[:-2])
     CAMVGG2 = CAMNet(latent_dim=512).to(device)
@@ -77,20 +74,21 @@ if __name__ == "__main__":
     x_adv = GSEAttack(modelVGG, targeted=True, **params)(images, targets)
     save_images(x_adv, x_cam, images, output_dir + 'VGG19targeted/')
 
-    x_cam = CAM(CAMResNet, CAMResNet1, images.clone().to(device), labels.to(device)).unsqueeze(1).cpu()
-
     # untargeted ResNet50 examples
-    with open('./attackParams.json', 'r') as f:
-        params = json.load(f)["GSE"]["untargeted"]["ImageNet"]
-    x_adv = GSEAttack(modelResNet, targeted=False, **params)(images, labels)
-    save_images(x_adv, x_cam, images, output_dir + 'ResNet50untargeted/GSE/')
+    # uncomment if you have a CAM model for ResNet50 at ./Saves/Models/CAMResNet50.pt
+    
+    # x_cam = CAM(CAMResNet, CAMResNet1, images.clone().to(device), labels.to(device)).unsqueeze(1).cpu()
+    # with open('./attackParams.json', 'r') as f:
+    #     params = json.load(f)["GSE"]["untargeted"]["ImageNet"]
+    # x_adv = GSEAttack(modelResNet, targeted=False, **params)(images, labels)
+    # save_images(x_adv, x_cam, images, output_dir + 'ResNet50untargeted/GSE/')
 
-    with open('./attackParams.json', 'r') as f:
-        params = json.load(f)["StrAttack"]["untargeted"]["ImageNet"]
-    x_adv = StrAttack(modelResNet, targeted=False, **params)(images, labels)
-    save_images(x_adv, x_cam, images, output_dir + 'ResNet50untargeted/StrAttack/')
+    # with open('./attackParams.json', 'r') as f:
+    #     params = json.load(f)["StrAttack"]["untargeted"]["ImageNet"]
+    # x_adv = StrAttack(modelResNet, targeted=False, **params)(images, labels)
+    # save_images(x_adv, x_cam, images, output_dir + 'ResNet50untargeted/StrAttack/')
 
-    with open('./attackParams.json', 'r') as f:
-        params = json.load(f)["FWnucl"]["untargeted"]["ImageNet"]
-    x_adv = FWnucl(modelResNet, targeted=False, **params)(images, labels)
-    save_images(x_adv, x_cam, images, output_dir + 'ResNet50untargeted/FWnucl/')
+    # with open('./attackParams.json', 'r') as f:
+    #     params = json.load(f)["FWnucl"]["untargeted"]["ImageNet"]
+    # x_adv = FWnucl(modelResNet, targeted=False, **params)(images, labels)
+    # save_images(x_adv, x_cam, images, output_dir + 'ResNet50untargeted/FWnucl/')
