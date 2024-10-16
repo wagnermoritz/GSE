@@ -4,21 +4,24 @@ from torchvision import transforms, datasets
 import argparse
 import pandas as pd
 import json
+import dill
 
 from attacks import *
 from utils import *
 from models import *
 
-IMAGENET_PATH = "path/to/ImageNet/dataset"
-NIPS_PATH = "path/to/NIPS/dataset"
-CIFAR_PATH = "path/to/CIFAR10/dataset"
+IMAGENET_PATH = "path_to_imagenet_dataset"
+NIPS_PATH = "path_to_nips2017_dataset"
+CIFAR_PATH = "path_to_cifar10_dataset"
+ADV_MODEL_PATH = "path_to_adv_trained_resnet50_weights" # https://github.com/MadryLab/robustness/tree/master
+RN20_PATH = "path_to_resnet20_weights"
 
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('--dataset', choices=['ImageNet', 'NIPS2017', 'CIFAR10'], type=str, required=True)
-    parser.add_argument('--model', choices=['ResNet50', 'VGG19', 'ViT_B_16', 'ResNet20'],
-                        help=('Choices ResNet50, VGG19, and ViT_B_16 for ImageNet or NIPS2017 datasets.'
+    parser.add_argument('--model', choices=['ResNet50', 'VGG19', 'ViT_B_16', 'ResNet20', 'ResNet50_adv'],
+                        help=('Choices ResNet50, VGG19, ResNet50_adv, and ViT_B_16 for ImageNet or NIPS2017 datasets.'
                         'Choice ResNet20 for CIFAR10 dataset.'), type=str, required=True)
     parser.add_argument('--numchunks', default=1, type=int, help=('Number of chunks to split the dataset into.'
                         'The test will be performed on the chunk with the index given by --chunk.'))
@@ -99,7 +102,12 @@ if __name__ == "__main__":
         model = torchvision.models.vit_b_16(weights='DEFAULT')
     elif args.model == 'ResNet20':
         model = ResNet20()
-        state_dict = torch.load("./Saves/Models/ResNet20CIFAR.pt", map_location=device)
+        state_dict = torch.load(RN20_PATH, map_location='cpu')
+        model.load_state_dict(state_dict)
+    elif args.model == 'ResNet50_adv':
+        model = torchvision.models.resnet50()
+        state_dict = torch.load(ADV_MODEL_PATH, map_location='cpu', pickle_module=dill)
+        state_dict = {key[len('module.model.'):]: state_dict['model'][key] for key in list(state_dict['model'].keys())[2:] if 'attacker' not in key}
         model.load_state_dict(state_dict)
 
     model.eval()
@@ -114,6 +122,11 @@ if __name__ == "__main__":
     jsonT = "targeted" if args.targeted else "untargeted"
     with open('./attackParams.json', 'r') as f:
         params = json.load(f)[args.attack][jsonT][jsonDS]
+    if args.attack == 'GSE' and args.model == 'ResNet50_adv':
+        params['mu'] = 0.0005
+        params['q'] = 0.9
+        params['sigma'] = 0.75
+        params['k_hat'] = 150
 
     seq = ''
     if args.sequential:

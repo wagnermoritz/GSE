@@ -1,5 +1,5 @@
 import torch
-import torch.utils.data
+import torch.nn as nn
 from torch.nn import functional as F
 import torchvision
 from torch.utils.data import Dataset

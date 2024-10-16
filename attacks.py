@@ -143,15 +143,15 @@ class GSEAttack(Attack):
             for i, (x_, y_) in enumerate(zip(x, y)):
                 result[i] = self.perform_att(x_.unsqueeze(0),
                                              y_.unsqueeze(0),
-                                             mu=self.mu, sigma=self.sigma,
+                                             mu=self.mu,
                                              k_hat=self.k_hat).detach()
             return result
         else:
-            return self.perform_att(x, y, mu=self.mu, sigma=self.sigma,
+            return self.perform_att(x, y, mu=self.mu,
                                     k_hat=self.k_hat)
 
 
-    def perform_att(self, x, y, mu, sigma, k_hat):
+    def perform_att(self, x, y, mu, k_hat):
         '''
         Perform GSE attack on a batch of images x with corresponding labels y.
         '''
@@ -179,6 +179,9 @@ class GSEAttack(Attack):
             y = save_y.clone()
             lams = save_lams.clone()
             lam = torch.ones_like(x)[:, 0, :, :] * lams.view(-1, 1, 1)
+            sigma = torch.full_like(lams, self.sigma).view(-1, 1, 1, 1)
+            # increase the step size if were not successful with only 2 steps left
+            sigma[((result - x).view(B, -1).abs().sum(-1) == 0) & (step >= self.search_steps-2)] *= 10
             # tensor for tracking for which images adv. examples have been found
             active = torch.ones(B, dtype=bool, device=self.device)
             # set initial perturbation to zero
@@ -205,20 +208,21 @@ class GSEAttack(Attack):
                     if j == k_hat:
                         lammask = (lam > lams.view(-1, 1, 1))[:, None, :, :]
                         lammask = lammask.repeat(1, C, 1, 1)
+                        noise[lammask] = 0
                         noise_old = noise.clone()
                     if j < k_hat:
                         noise = noise - sigma * noise.grad.data
-                        noise = self.prox(noise, lam * sigma)
+                        noise = self.prox(noise, lam * sigma.view(-1, 1, 1))
                         noise_tmp = noise.clone()
                         noise = lr / lr_ * noise + (1 - (lr/ lr_)) * noise_old
                         noise_old = noise_tmp.clone()
                         lam = self.adjust_lambda(lam, noise)
                     else:
                         noise = noise - sigma * noise.grad.data
+                        noise[lammask] = 0
                         noise_tmp = noise.clone()
                         noise = lr / lr_ * noise + (1 - (lr/ lr_)) * noise_old
                         noise_old = noise_tmp.clone()
-                        noise[lammask] = 0
 
                     # clamp adv. example to valid range
                     x_adv = torch.clamp(x + noise, *self.img_range)
@@ -237,6 +241,7 @@ class GSEAttack(Attack):
                         x, y, noise = x[mask], y[mask], noise[mask]
                         lams, lam = lams[mask], lam[mask]
                         noise_old = noise_old[mask]
+                        sigma = sigma[mask]
                         if j >= k_hat:
                             lammask = lammask[mask]
 
@@ -249,7 +254,7 @@ class GSEAttack(Attack):
             for i in range(B):
                 if active[i]:
                     ub_lams[i] = save_lams[i]
-                    save_lams[i] = 0.95 * lb_lams[i] + 0.05 * save_lams[i]
+                    save_lams[i] = 0.9 * lb_lams[i] + 0.1 * save_lams[i]
                 else:
                     l0 = self.l20((result[i] - save_x[i]).unsqueeze(0)).to(self.device)
                     if l0 < best_l0[i]:
